@@ -15,7 +15,9 @@ function readVip() {
 }
 
 function saveVip(data) {
-  fs.writeFileSync(VIP_FILE, JSON.stringify(data, null, 2));
+  try {
+    fs.writeFileSync(VIP_FILE, JSON.stringify(data, null, 2));
+  } catch {}
 }
 
 function normalizeNumber(x) {
@@ -31,13 +33,23 @@ function isOwner(senderNumber, settings) {
   const owners = Array.isArray(settings?.ownerNumbers)
     ? settings.ownerNumbers
     : (typeof settings?.ownerNumber === "string" ? [settings.ownerNumber] : []);
-  return owners.map(normalizeNumber).includes(normalizeNumber(senderNumber));
+
+  const sender = normalizeNumber(senderNumber);
+  return owners.map(normalizeNumber).includes(sender);
 }
 
-// ✅ Verifica VIP y descuenta 1 uso
+/**
+ * ✅ Verifica VIP y descuenta 1 uso
+ * - Owner: ilimitado (no revisa vencimiento ni usos)
+ * - VIP: revisa expiresAt y usesLeft
+ */
 export function checkVipAndConsume({ msg, from, settings }) {
   const sender = normalizeNumber(getSenderNumber(msg, from));
-  if (isOwner(sender, settings)) return { ok: true, owner: true };
+
+  // 👑 OWNER = ILIMITADO
+  if (isOwner(sender, settings)) {
+    return { ok: true, owner: true, unlimited: true };
+  }
 
   const data = readVip();
   const info = data.users[sender];
@@ -46,14 +58,14 @@ export function checkVipAndConsume({ msg, from, settings }) {
 
   const now = Date.now();
 
-  // vencido
+  // ⏳ vencido
   if (typeof info.expiresAt === "number" && now >= info.expiresAt) {
     delete data.users[sender];
     saveVip(data);
     return { ok: false, reason: "expired" };
   }
 
-  // sin usos
+  // 🎟️ usos
   if (typeof info.usesLeft === "number") {
     if (info.usesLeft <= 0) {
       delete data.users[sender];
@@ -67,5 +79,11 @@ export function checkVipAndConsume({ msg, from, settings }) {
     saveVip(data);
   }
 
-  return { ok: true, owner: false, usesLeft: info.usesLeft, expiresAt: info.expiresAt };
+  return {
+    ok: true,
+    owner: false,
+    usesLeft: info.usesLeft,
+    expiresAt: info.expiresAt,
+  };
 }
+
