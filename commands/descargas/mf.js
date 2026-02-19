@@ -1,18 +1,18 @@
-const axios = require("axios");
-const fs = require("fs");
-const path = require("path");
+import axios from "axios";
+import fs from "fs";
+import path from "path";
 
-const BOT_NAME = "Dvyer";
+const BOT_NAME = "SonGokuBot";
 const API_KEY = "dvyer";
 const API_URL = "https://api-adonix.ultraplus.click/download/mediafire";
-const MAX_MB = 300; // 🔒 Límite 300MB
+const MAX_MB = 300; // límite permitido
 
-module.exports = {
+export default {
   command: ["mediafire", "mf"],
   categoria: "descarga",
-  description: "Descarga archivos de MediaFire y los envía",
+  description: "Descarga archivos de MediaFire",
 
-  run: async (client, m, args) => {
+  run: async ({ client, m, args }) => {
     let filePath;
 
     try {
@@ -33,7 +33,7 @@ module.exports = {
 
       const file = res.data.result;
 
-      // 📦 Detectar tamaño real
+      // 📦 Detectar tamaño
       let sizeMB = 0;
 
       if (file.size?.includes("MB")) {
@@ -42,21 +42,25 @@ module.exports = {
         sizeMB = parseFloat(file.size) * 1024;
       }
 
-      // 🚫 Si supera 300MB → solo link
+      // 🚫 Si supera 300MB → enviar solo link
       if (sizeMB > MAX_MB) {
-        return client.sendMessage(m.chat, {
-          text:
-            `📁 *MediaFire Downloader*\n\n` +
-            `📄 *Archivo:* ${file.filename}\n` +
-            `📦 *Tamaño:* ${file.size}\n` +
-            `📂 *Tipo:* ${file.filetype}\n\n` +
-            `⚠️ El archivo supera el límite de 300MB\n\n` +
-            `🔗 Descárgalo manualmente:\n${file.link}`
-        }, { quoted: m });
+        return client.sendMessage(
+          m.chat,
+          {
+            text:
+              `📁 *MediaFire Downloader*\n\n` +
+              `📄 *Archivo:* ${file.filename}\n` +
+              `📦 *Tamaño:* ${file.size}\n` +
+              `📂 *Tipo:* ${file.filetype}\n\n` +
+              `⚠️ Supera el límite de 300MB\n\n` +
+              `🔗 Descargar aquí:\n${file.link}`
+          },
+          { quoted: m }
+        );
       }
 
       // 📂 Carpeta temporal
-      const tmpDir = path.join(__dirname, "../../tmp");
+      const tmpDir = path.join(process.cwd(), "tmp");
       fs.mkdirSync(tmpDir, { recursive: true });
 
       const safeName = file.filename.replace(/[\\/:*?"<>|]/g, "");
@@ -89,9 +93,8 @@ module.exports = {
 
     } catch (err) {
       console.error("MEDIAFIRE ERROR:", err.message);
-      await m.reply("❌ Error al descargar el archivo de MediaFire.");
+      await m.reply("❌ Error al descargar el archivo.");
     } finally {
-      // 🧹 Eliminar archivo temporal
       if (filePath && fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
       }
