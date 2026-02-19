@@ -10,7 +10,7 @@ import chalk from 'chalk';
 import readline from 'readline';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath, pathToFileURL } from 'url';
+import { fileURLToPath } from 'url';
 
 // ================= CONFIG =================
 const CARPETA_AUTH = 'dvyer-session';
@@ -165,9 +165,7 @@ async function cargarComandos() {
             if (!a.name.endsWith('.js')) continue;
 
             try {
-                // ✅ FIX WINDOWS + ESM: convertir ruta absoluta a file:// URL
-                const cmd = (await import(pathToFileURL(ruta).href)).default;
-
+                const cmd = (await import(ruta)).default;
                 if (!cmd || typeof cmd.run !== 'function') continue;
 
                 const nombres = [];
@@ -222,12 +220,12 @@ async function barraCarga(duracion = 2000, ancho = 20) {
 // ================= BORRADO AUTOMÁTICO TMP =================
 function limpiarTMP() {
     if (!fs.existsSync(TMP_DIR)) {
-        try { fs.mkdirSync(TMP_DIR, { recursive: true }); } catch { }
+        try { fs.mkdirSync(TMP_DIR, { recursive: true }); } catch {}
         return;
     }
     try {
         fs.readdirSync(TMP_DIR).forEach(file => {
-            try { fs.unlinkSync(path.join(TMP_DIR, file)); } catch { }
+            try { fs.unlinkSync(path.join(TMP_DIR, file)); } catch {}
         });
         console.log(chalk.yellowBright(`🧹 Carpeta TMP limpiada`));
     } catch (e) {
@@ -357,18 +355,27 @@ async function iniciarBot() {
         }
 
         // ================= COMANDOS INTERNOS: .consola / .logs / .errores =================
+        // Esto funciona aunque no tengas comando en carpeta.
+        // Usa tu prefijo real (o SIN PREFIJO si está activado).
         const prefijos = obtenerPrefijos();
         const modoSinPrefijo = esModoSinPrefijo();
 
         const txt = texto.trim();
 
+        // Detectar comando interno con o sin prefijo
+        // Formatos:
+        // .consola
+        // .consola 80
+        // .clearconsola
         const internalMatch = (() => {
+            // con prefijo
             if (!modoSinPrefijo) {
                 for (const p of prefijos) {
                     if (txt.startsWith(p)) return { p, body: txt.slice(p.length).trim() };
                 }
                 return null;
             }
+            // sin prefijo
             return { p: null, body: txt };
         })();
 
@@ -377,13 +384,16 @@ async function iniciarBot() {
             const c = (parts[0] || "").toLowerCase();
             const n = parts[1];
 
+            // Mostrar consola
             if (["consola", "logs", "errores"].includes(c)) {
+                // recomendado: solo owner en grupos
                 if (!esOwner) {
                     return sock.sendMessage(from, { text: "👑 Solo el owner puede ver la consola." });
                 }
                 return await enviarConsola(sock, from, n || 30);
             }
 
+            // Limpiar consola
             if (["clearconsola", "clearlogs"].includes(c)) {
                 if (!esOwner) {
                     return sock.sendMessage(from, { text: "👑 Solo el owner puede limpiar la consola." });
@@ -484,3 +494,4 @@ process.on('SIGINT', () => {
     console.log(chalk.bgYellow.black('\n👋 DVYER BOT apagado'));
     process.exit(0);
 });
+
