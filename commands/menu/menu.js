@@ -15,7 +15,7 @@ function formatUptime(seconds) {
   return `${s}s`;
 }
 
-// 🎨 Emojis por categoría (edítalo a tu gusto)
+// 🎨 Emojis por categoría
 const CAT_ICON = {
   menu: "📜",
   music: "🎵",
@@ -32,15 +32,94 @@ function getCatIcon(cat) {
   return CAT_ICON[cat] || CAT_ICON.default;
 }
 
+// Normaliza texto
+function norm(s) {
+  return String(s || "").trim().toLowerCase();
+}
+
+// Construye la estructura { cat -> Set(comandos) }
+function buildCategories(comandos) {
+  const categorias = new Map();
+
+  for (const cmd of new Set(comandos.values())) {
+    if (!cmd?.category || !cmd?.command) continue;
+
+    const cat = norm(cmd.category) || "otros";
+    const names = Array.isArray(cmd.command) ? cmd.command : [cmd.command];
+
+    if (!categorias.has(cat)) categorias.set(cat, new Set());
+    const set = categorias.get(cat);
+
+    for (const n of names) {
+      const name = norm(n);
+      if (!name) continue;
+      set.add(name);
+    }
+  }
+
+  return categorias;
+}
+
+function buildHeader({ botName, prefix, uptime, totalCats, totalCmds }) {
+  return (
+    `╭══════════════════════╮\n` +
+    `│ ✦ *${botName}* ✦\n` +
+    `╰══════════════════════╯\n\n` +
+    `▸ _prefijo_ : *${prefix}*\n` +
+    `▸ _estado_  : *online*\n` +
+    `▸ _uptime_  : *${uptime}*\n` +
+    `▸ _categorías_ : *${totalCats}*\n` +
+    `▸ _comandos_   : *${totalCmds}*\n\n` +
+    `┌──────────────────────┐\n` +
+    `│ ✧ *MENÚ DE COMANDOS* ✧\n` +
+    `└──────────────────────┘\n`
+  );
+}
+
+function buildFooter(prefix) {
+  return (
+    `\n┌──────────────────────┐\n` +
+    `│ ✦ _bot premium activo_ ✦\n` +
+    `└──────────────────────┘\n` +
+    `💡 Tips:\n` +
+    `• *${prefix}menu music*  (solo música)\n` +
+    `• *${prefix}menu all*    (todo completo)\n` +
+    `• *${prefix}play <texto>* (buscar y descargar)\n` +
+    `_artoria bot vip_\n`
+  );
+}
+
+function buildCategoryBlock({ cat, cmds, prefix, maxPerCat }) {
+  const icon = getCatIcon(cat);
+  const sorted = [...cmds].sort();
+  const total = sorted.length;
+
+  let block =
+    `\n╭─ ${icon} *${cat.toUpperCase()}*  _(${total})_\n` +
+    `│`;
+
+  const shown = maxPerCat ? sorted.slice(0, maxPerCat) : sorted;
+
+  for (const c of shown) {
+    block += `\n│  • \`${prefix}${c}\``;
+  }
+
+  if (maxPerCat && total > maxPerCat) {
+    block += `\n│  • … y *${total - maxPerCat}* más`;
+  }
+
+  block += `\n╰──────────────────────`;
+  return block;
+}
+
 export default {
   command: ["menu"],
   category: "menu",
   description: "Menú principal con diseño premium",
 
-  run: async ({ sock, msg, from, settings, comandos }) => {
+  run: async ({ sock, msg, from, settings, comandos, args = [] }) => {
     try {
       if (!sock || !from) return;
-
       if (!comandos) {
         return sock.sendMessage(from, { text: "❌ error interno" }, { quoted: msg });
       }
@@ -53,72 +132,69 @@ export default {
       const videoPath = path.join(process.cwd(), "videos", "menu-video.mp4");
       const hasVideo = fs.existsSync(videoPath);
 
-      // 📂 agrupar comandos (sin duplicados)
-      const categorias = new Map();
-
-      for (const cmd of new Set(comandos.values())) {
-        if (!cmd?.category || !cmd?.command) continue;
-
-        const cat = String(cmd.category).toLowerCase().trim() || "otros";
-        const names = Array.isArray(cmd.command) ? cmd.command : [cmd.command];
-
-        if (!categorias.has(cat)) categorias.set(cat, new Set());
-        const set = categorias.get(cat);
-
-        for (const n of names) {
-          if (!n) continue;
-          set.add(String(n).toLowerCase());
-        }
-      }
-
-      // ✅ Ordenar categorías
+      // 📂 armar categorías
+      const categorias = buildCategories(comandos);
       const catsSorted = [...categorias.keys()].sort();
 
-      // 🎨 MENÚ premium (más compacto)
-      let menu =
-        `╭══════════════════════╮\n` +
-        `│ ✦ *${botName}* ✦\n` +
-        `╰══════════════════════╯\n\n` +
-        `▸ _prefijo_ : *${prefix}*\n` +
-        `▸ _estado_  : *online*\n` +
-        `▸ _uptime_  : *${uptime}*\n\n` +
-        `┌──────────────────────┐\n` +
-        `│ ✧ *MENÚ DE COMANDOS* ✧\n` +
-        `└──────────────────────┘\n`;
+      // totals
+      let totalCmds = 0;
+      for (const set of categorias.values()) totalCmds += set.size;
 
-      // 👇 Limita comandos por categoría (para que no sea gigante)
-      const MAX_PER_CAT = 6;
+      // 🔎 modo de menú
+      const arg = norm(args?.[0] || "");
+      const showAll = arg === "all";
+      const filterCat = arg && arg !== "all" ? arg : null;
 
-      for (const cat of catsSorted) {
-        const icon = getCatIcon(cat);
-        const cmds = [...categorias.get(cat)].sort();
-        const total = cmds.length;
-
-        menu +=
-          `\n╭─ ${icon} *${cat.toUpperCase()}*  _(${total})_\n` +
-          `│`;
-
-        const shown = cmds.slice(0, MAX_PER_CAT);
-        for (const c of shown) {
-          menu += `\n│  • \`${prefix}${c}\``;
-        }
-
-        if (total > MAX_PER_CAT) {
-          menu += `\n│  • … y *${total - MAX_PER_CAT}* más`;
-        }
-
-        menu += `\n╰──────────────────────`;
+      // Si pidió una categoría específica y no existe:
+      if (filterCat && !categorias.has(filterCat)) {
+        const available = catsSorted.slice(0, 12).map(c => `${getCatIcon(c)} ${c}`).join(", ");
+        return sock.sendMessage(
+          from,
+          {
+            text:
+              headerBox("MENU") +
+              `\n\n⚠️ Categoría no encontrada: *${filterCat}*\n\n` +
+              `✅ Ejemplos:\n` +
+              `• ${prefix}menu music\n` +
+              `• ${prefix}menu descarga\n` +
+              `• ${prefix}menu all\n\n` +
+              `📂 Disponibles: ${available}` +
+              (catsSorted.length > 12 ? " …" : ""),
+          },
+          { quoted: msg }
+        );
       }
 
-      menu +=
-        `\n\n┌──────────────────────┐\n` +
-        `│ ✦ _bot premium activo_ ✦\n` +
-        `└──────────────────────┘\n` +
-        `_artoria bot vip_\n`;
+      // ✅ construir menú
+      const totalCats = catsSorted.length;
+      let menu = buildHeader({ botName, prefix, uptime, totalCats, totalCmds });
 
-      // 🚀 Enviar
+      const MAX_PER_CAT = showAll ? null : 6;
+
+      if (filterCat) {
+        // solo una categoría
+        menu += buildCategoryBlock({
+          cat: filterCat,
+          cmds: categorias.get(filterCat),
+          prefix,
+          maxPerCat: null, // en vista por categoría: muestro TODO
+        });
+      } else {
+        // menú general
+        for (const cat of catsSorted) {
+          menu += buildCategoryBlock({
+            cat,
+            cmds: categorias.get(cat),
+            prefix,
+            maxPerCat: MAX_PER_CAT,
+          });
+        }
+      }
+
+      menu += buildFooter(prefix);
+
+      // 🚀 Enviar (video si existe, si no texto)
       if (hasVideo) {
-        // ✅ Mejor: enviar como stream, NO readFileSync (menos RAM)
         await sock.sendMessage(
           from,
           {
@@ -130,12 +206,8 @@ export default {
           { quoted: msg }
         );
       } else {
-        // Si no hay video, manda solo texto
         await sock.sendMessage(from, { text: menu.trim() }, { quoted: msg });
       }
     } catch (err) {
       console.error("MENU ERROR:", err);
-      await sock.sendMessage(from, { text: "❌ error al mostrar el menú" }, { quoted: msg });
-    }
-  },
-};
+      await sock.sendMessage(from, { text: "❌ err
