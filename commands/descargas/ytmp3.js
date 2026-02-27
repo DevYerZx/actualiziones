@@ -7,8 +7,8 @@ import path from "path";
 const API_URL = "https://nexevo-api.vercel.app/download/y";
 const COOLDOWN = 8000;
 const cooldowns = new Map();
+const MAX_BYTES = 25 * 1024 * 1024;
 
-const MAX_BYTES = 25 * 1024 * 1024; // 25MB
 let busy = false;
 
 function wait(ms) {
@@ -35,6 +35,7 @@ async function cleanTmp(dir, maxAgeMs = 60 * 60 * 1000) {
   } catch {
     return;
   }
+
   for (const name of files) {
     const p = path.join(dir, name);
     try {
@@ -88,7 +89,6 @@ export default {
         );
       }
 
-      // React inicio
       if (messageKey) {
         await sock.sendMessage(from, { react: { text: "⏳", key: messageKey } });
       }
@@ -113,11 +113,22 @@ export default {
         duration = v.timestamp;
       }
 
-      // 🔔 MENSAJE DE DESCARGA
+      // 🔔 MENSAJE DE DESCARGA CON TARJETA
       await sock.sendMessage(
         from,
         {
           text: `🎧 *Descargando Audio...*\n\n🎵 ${title}\n⏱ ${duration}`,
+          contextInfo: {
+            externalAdReply: {
+              title: title,
+              body: `⏱ Duración: ${duration}`,
+              thumbnailUrl: thumbnail,
+              sourceUrl: videoUrl,
+              mediaType: 1,
+              renderLargerThumbnail: true,
+              showAdAttribution: false
+            }
+          },
           ...global.channelInfo
         },
         msg ? { quoted: msg } : undefined
@@ -141,18 +152,17 @@ export default {
             audio: { url: directUrl },
             mimetype: "audio/mpeg",
             fileName: `${safeFileName(title)}.mp3`,
-            contextInfo: thumbnail
-              ? {
-                  externalAdReply: {
-                    title,
-                    body: `⏱ ${duration}`,
-                    thumbnailUrl: thumbnail,
-                    sourceUrl: videoUrl,
-                    mediaType: 1,
-                    renderLargerThumbnail: true,
-                  },
-                }
-              : undefined,
+            contextInfo: {
+              externalAdReply: {
+                title: title,
+                body: `⏱ ${duration}`,
+                thumbnailUrl: thumbnail,
+                sourceUrl: videoUrl,
+                mediaType: 1,
+                renderLargerThumbnail: true,
+                showAdAttribution: false
+              }
+            },
             ...global.channelInfo
           },
           msg ? { quoted: msg } : undefined
@@ -181,3 +191,6 @@ export default {
     }
   },
 };
+
+process.on("uncaughtException", (e) => console.error("Uncaught:", e));
+process.on("unhandledRejection", (e) => console.error("Unhandled:", e));
