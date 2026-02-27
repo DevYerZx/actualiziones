@@ -18,6 +18,12 @@ if (!fs.existsSync(TMP_DIR)) {
   fs.mkdirSync(TMP_DIR, { recursive: true });
 }
 
+// Directorio temporal personalizado para ffmpeg (cambiar a una ubicación con más espacio)
+const FFMPEG_TMP_DIR = path.join(os.tmpdir(), "ffmpeg_tmp");
+if (!fs.existsSync(FFMPEG_TMP_DIR)) {
+  fs.mkdirSync(FFMPEG_TMP_DIR, { recursive: true });
+}
+
 export default {
   command: ["ytmp4"],
   category: "descarga",
@@ -117,8 +123,9 @@ export default {
 
       // 🎞️ NORMALIZAR CON FFMPEG (IMPORTANTE PARA WHATSAPP)
       await new Promise((resolve, reject) => {
+        // Usamos la variable FFMPEG_TMP_DIR como directorio temporal para ffmpeg
         exec(
-          `ffmpeg -y -loglevel error -i "${rawMp4}" -map 0:v -map 0:a? -movflags +faststart -c:v copy -c:a copy "${finalMp4}"`,
+          `ffmpeg -y -loglevel error -i "${rawMp4}" -map 0:v -map 0:a? -movflags +faststart -c:v copy -c:a copy "${finalMp4}" -tmpdir "${FFMPEG_TMP_DIR}"`,
           (err) => (err ? reject(err) : resolve())
         );
       });
