@@ -1,7 +1,10 @@
 import fs from "fs";
 import path from "path";
 import ffmpeg from "fluent-ffmpeg";
+import pino from "pino";
+import { downloadMediaMessage } from "@whiskeysockets/baileys";
 
+const logger = pino({ level: "silent" });
 const TMP_DIR = path.join(process.cwd(), "tmp");
 
 function ensureTmp() {
@@ -10,6 +13,22 @@ function ensureTmp() {
 
 function randName(ext) {
   return `${Date.now()}_${Math.floor(Math.random() * 99999)}.${ext}`;
+}
+
+function buildQuotedWAMessage(msg) {
+  const ctx = msg.message?.extendedTextMessage?.contextInfo;
+  const quoted = ctx?.quotedMessage;
+  if (!quoted) return null;
+
+  return {
+    key: {
+      remoteJid: msg.key.remoteJid,
+      fromMe: false,
+      id: ctx.stanzaId,
+      participant: ctx.participant,
+    },
+    message: quoted,
+  };
 }
 
 function ffmpegToWebp(input, output) {
@@ -22,7 +41,7 @@ function ffmpegToWebp(input, output) {
         "-qscale", "50",
         "-preset", "default",
         "-an",
-        "-vsync", "0"
+        "-vsync", "0",
       ])
       .toFormat("webp")
       .on("end", resolve)
@@ -35,55 +54,61 @@ export default {
   command: ["sticker", "s"],
   category: "media",
   description: "Imagen/Video a sticker",
+
   run: async ({ sock, msg, from }) => {
     try {
       ensureTmp();
 
-      const q =
-        msg.message?.extendedTextMessage?.contextInfo?.quotedMessage || null;
+      const quotedMsg = buildQuotedWAMessage(msg);
+      const targetMsg = quotedMsg || msg;
 
-      const mime =
-        q?.imageMessage?.mimetype ||
-        q?.videoMessage?.mimetype ||
-        msg.message?.imageMessage?.mimetype ||
-        msg.message?.videoMessage?.mimetype ||
-        "";
+      const hasImage =
+        !!targetMsg.message?.imageMessage ||
+        !!targetMsg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.imageMessage;
 
-      const isQuotedImage = !!q?.imageMessage;
-      const isQuotedVideo = !!q?.videoMessage;
-      const isDirectImage = !!msg.message?.imageMessage;
-      const isDirectVideo = !!msg.message?.videoMessage;
+      const hasVideo =
+        !!targetMsg.message?.videoMessage ||
+        !!targetMsg.message?.extendedTextMessage?.contextInfo?.quotedMessage?.videoMessage;
 
-      if (!mime || (!isQuotedImage && !isQuotedVideo && !isDirectImage && !isDirectVideo)) {
+      if (!hasImage && !hasVideo) {
         return sock.sendMessage(
           from,
-          { text: "⚙️ Usa: responde a una *imagen/video* con .sticker", ...global.channelInfo },
+          { text: "⚙️ Responde a una *imagen/video* con .sticker", ...global.channelInfo },
           { quoted: msg }
         );
       }
 
-      const dlMsg = isQuotedImage || isQuotedVideo ? { message: q } : msg;
+      const buff = await downloadMediaMessage(
+        targetMsg,
+        "buffer",
+        {},
+        { logger, reuploadRequest: sock.updateMediaMessage }
+      );
 
-      const buff = await sock.downloadMediaMessage(dlMsg);
-      const inFile = path.join(TMP_DIR, randName(isQuotedVideo || isDirectVideo ? "mp4" : "jpg"));
+      const inFile = path.join(TMP_DIR, randName(hasVideo ? "mp4" : "jpg"));
       const outFile = path.join(TMP_DIR, randName("webp"));
 
       fs.writeFileSync(inFile, buff);
-
       await ffmpegToWebp(inFile, outFile);
 
       const webp = fs.readFileSync(outFile);
       fs.unlinkSync(inFile);
       fs.unlinkSync(outFile);
 
-      return sock.sendMessage(
-        from,
-        { sticker: webp, ...global.channelInfo },
-        { quoted: msg }
-      );
+      return sock.sendMessage(from, { sticker: webp, ...global.channelInfo }, { quoted: msg });
     } catch (e) {
       console.error("sticker error:", e);
-      return sock.sendMessage(from, { text: "❌ Error creando sticker.", ...global.channelInfo }, { quoted: msg });
+
+      // Si tu server no tiene ffmpeg instalado, este es el error típico
+      const tip = String(e?.message || "").toLowerCase().includes("ffmpeg")
+        ? "\n\n💡 *Solución:* instala ffmpeg en tu VPS/PC."
+        : "";
+
+      return sock.sendMessage(
+        from,
+        { text: `❌ Error creando sticker.${tip}`, ...global.channelInfo },
+        { quoted: msg }
+      );
     }
   }
 };
