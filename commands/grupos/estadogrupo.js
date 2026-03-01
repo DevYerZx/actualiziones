@@ -6,7 +6,7 @@ const DB_DIR = path.join(process.cwd(), "database");
 function safeJsonParse(raw) {
   try {
     const a = JSON.parse(raw);
-    if (typeof a === "string") return JSON.parse(a); // por si quedó "[]"
+    if (typeof a === "string") return JSON.parse(a);
     return a;
   } catch {
     return null;
@@ -36,21 +36,21 @@ export default {
   adminOnly: true,
 
   run: async ({ sock, msg, from }) => {
-    // Archivos (si alguno no existe, lo toma como OFF/TEMP)
     const welcomeFile = path.join(DB_DIR, "welcome.json");
     const modoAdmiFile = path.join(DB_DIR, "modoadmi.json");
+    const antilinkFile = path.join(DB_DIR, "antilink.json");
+    const antispamFile = path.join(DB_DIR, "antispam.json");
 
-    const antilinkFile = path.join(DB_DIR, "antilink.json"); // si usas persistente
-    const antispamFile = path.join(DB_DIR, "antispam.json"); // persistente
-
-    // NUEVO: Anti-Tóxicos
-    const antitoxicosFile = path.join(DB_DIR, "antitoxicos_groups.json");
+    // NUEVOS:
+    const antiInsultosFile = path.join(DB_DIR, "antiinsultos_groups.json");
+    const anti18File = path.join(DB_DIR, "anti18_groups.json");
 
     const welcomeSet = readSetFromFile(welcomeFile);
     const modoAdmiSet = readSetFromFile(modoAdmiFile);
     const antilinkSet = readSetFromFile(antilinkFile);
     const antispamSet = readSetFromFile(antispamFile);
-    const antitoxicosSet = readSetFromFile(antitoxicosFile);
+    const antiInsultosSet = readSetFromFile(antiInsultosFile);
+    const anti18Set = readSetFromFile(anti18File);
 
     const welcomeOn = welcomeSet.has(from);
     const modoAdmiOn = modoAdmiSet.has(from);
@@ -59,7 +59,8 @@ export default {
     const antilinkLabel = antilinkExists ? onOff(antilinkSet.has(from)) : "TEMP ♻️ (no guardado)";
 
     const antispamOn = antispamSet.has(from);
-    const antitoxicosOn = antitoxicosSet.has(from);
+    const antiInsultosOn = antiInsultosSet.has(from);
+    const anti18On = anti18Set.has(from);
 
     const caption =
       `🧩 *ESTADO DEL GRUPO*\n\n` +
@@ -67,23 +68,15 @@ export default {
       `• ModoAdmin: ${onOff(modoAdmiOn)}\n` +
       `• Antilink: ${antilinkLabel}\n` +
       `• Antispam: ${onOff(antispamOn)}\n` +
-      `• Anti-Tóxicos: ${onOff(antitoxicosOn)}\n\n` +
+      `• Anti-Insultos: ${onOff(antiInsultosOn)}\n` +
+      `• Anti +18: ${onOff(anti18On)}\n\n` +
       `👮 Solo admins pueden usar este comando.`;
 
-    // Foto del grupo + caption
     try {
       const ppUrl = await sock.profilePictureUrl(from, "image");
-      return sock.sendMessage(
-        from,
-        { image: { url: ppUrl }, caption, ...global.channelInfo },
-        { quoted: msg }
-      );
+      return sock.sendMessage(from, { image: { url: ppUrl }, caption, ...global.channelInfo }, { quoted: msg });
     } catch {
-      return sock.sendMessage(
-        from,
-        { text: caption, ...global.channelInfo },
-        { quoted: msg }
-      );
+      return sock.sendMessage(from, { text: caption, ...global.channelInfo }, { quoted: msg });
     }
   }
 };
