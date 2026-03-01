@@ -1,209 +1,112 @@
-import axios from "axios";
 import yts from "yt-search";
+import fetch from "node-fetch";
+import { getBuffer } from "../lib/message.js";
+import sharp from "sharp";
 
-const VREDEN_API = "https://api.vreden.my.id/api/v1/download/youtube/audio";
-const COOLDOWN = 8000;
-const cooldowns = new Map();
+const api = { url: "https://nexevo-api.vercel.app" };
 
-function safeFileName(name) {
-  return String(name || "audio")
-    .replace(/[\\/:*?"<>|]/g, "")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 60);
-}
-
-// Limpia links con ?si= / &list= / etc. y deja watch?v=ID
-function cleanYoutubeUrl(input) {
-  try {
-    const u = new URL(input);
-
-    // youtu.be/ID
-    if (u.hostname.includes("youtu.be")) {
-      const id = u.pathname.replace("/", "");
-      return `https://youtube.com/watch?v=${id}`;
-    }
-
-    // youtube.com/watch?v=ID
-    const v = u.searchParams.get("v");
-    if (v) return `https://youtube.com/watch?v=${v}`;
-
-    return input;
-  } catch {
-    return input;
-  }
-}
+const isYTUrl = (url) =>
+  /^(https?:\/\/)?(www\.)?(youtube\.com|youtu\.be)\/.+$/i.test(url);
 
 export default {
-  command: ["ytav", "ytmp3v", "mp3v"],
-  category: "descarga",
+  command: ["play2", "mp4", "ytmp4", "ytvideo", "playvideo"],
+  category: "downloader",
 
   run: async (ctx) => {
+    // ✅ Adaptación a tu bot
     const { sock, from, args } = ctx;
-    const msg = ctx.m || ctx.msg || null;
-    const messageKey = msg?.key || null;
+    const m = ctx.m || ctx.msg || null;
 
-    const now = Date.now();
-    const userCooldown = cooldowns.get(from);
-
-    if (userCooldown && now < userCooldown) {
+    const reply = async (text) => {
       return sock.sendMessage(
         from,
-        { text: `⏳ Espera ${Math.ceil((userCooldown - now) / 1000)}s`, ...global.channelInfo },
-        msg ? { quoted: msg } : undefined
+        { text, ...global.channelInfo },
+        m ? { quoted: m } : undefined
       );
-    }
-    cooldowns.set(from, now + COOLDOWN);
+    };
 
     try {
-      if (!args?.length) {
-        cooldowns.delete(from);
-        return sock.sendMessage(
-          from,
-          { text: "🎧 Uso: .ytav <nombre o link de YouTube>", ...global.channelInfo },
-          msg ? { quoted: msg } : undefined
+      if (!args?.[0]) {
+        return reply(
+          "🌸 *Shizuka AI:*\n> Por favor, indícame qué video deseas visualizar."
         );
       }
 
-      if (messageKey) {
-        try { await sock.sendMessage(from, { react: { text: "⏳", key: messageKey } }); } catch {}
-      }
+      const query = args.join(" ");
+      let url, title, thumbBuffer, videoData;
 
-      let query = args.join(" ").trim();
-      let videoUrl = query;
-
-      // Metadata para tarjeta
-      let title = "YouTube Audio";
-      let thumbnail = "";
-      let duration = "??";
-
-      // Si no es link: busca
-      if (!/^https?:\/\//i.test(query)) {
-        const { videos } = await yts(query);
-        if (!videos?.length) throw new Error("Sin resultados");
-
-        const v = videos.find((x) => x.seconds && x.seconds < 1800) || videos[0];
-        videoUrl = v.url;
-        title = v.title;
-        thumbnail = v.thumbnail;
-        duration = v.timestamp;
-      } else {
-        // Si es link: lo limpiamos
-        videoUrl = cleanYoutubeUrl(query);
-
-        // Opcional: sacar metadata con yts para bonita tarjeta
-        try {
-          const u = new URL(videoUrl);
-          const vid = u.searchParams.get("v");
-          if (vid) {
-            const info = await yts({ videoId: vid });
-            if (info?.title) {
-              title = info.title;
-              thumbnail = info.thumbnail || info.image || "";
-              duration = info.timestamp || info.duration?.timestamp || duration;
-            }
-          }
-        } catch {}
-      }
-
-      // Mensaje con tarjeta (como tu estilo)
-      await sock.sendMessage(
-        from,
-        {
-          text: `🎧 *Descargando Audio (Vreden)*\n\n🎵 ${title}\n⏱ ${duration}`,
-          contextInfo: {
-            externalAdReply: {
-              title,
-              body: `⏱ Duración: ${duration}`,
-              thumbnailUrl: thumbnail || undefined,
-              sourceUrl: videoUrl,
-              mediaType: 1,
-              renderLargerThumbnail: true,
-              showAdAttribution: false,
-            },
-          },
-          ...global.channelInfo,
-        },
-        msg ? { quoted: msg } : undefined
-      );
-
-      // ✅ SOLO VREDEN API
-      const apiUrl =
-        `${VREDEN_API}?url=${encodeURIComponent(videoUrl)}&quality=128`;
-
-      const { data } = await axios.get(apiUrl, { timeout: 30000 });
-
-      // Si la API responde pero status false
-      if (!data?.status || !data?.result) {
-        throw new Error("Respuesta inválida de Vreden");
-      }
-
-      // Caso como tu ejemplo: download.status=false "Converting error"
-      if (data.result?.download?.status === false) {
-        const reason = data.result.download?.message || "Converting error";
-        cooldowns.delete(from);
-
-        if (messageKey) {
-          try { await sock.sendMessage(from, { react: { text: "❌", key: messageKey } }); } catch {}
+      if (!isYTUrl(query)) {
+        const search = await yts(query);
+        if (!search.all.length) {
+          return reply(
+            "🥀 *Lo siento,*\n> no encontré resultados para tu búsqueda."
+          );
         }
+        videoData = search.all[0];
+        url = videoData.url;
+      } else {
+        const videoId = query.split("v=")[1] || query.split("/").pop();
+        const search = await yts({ videoId });
+        videoData = search;
+        url = query;
+      }
 
-        return sock.sendMessage(
-          from,
-          { text: `❌ Vreden no pudo convertir el audio.\n> Motivo: *${reason}*`, ...global.channelInfo },
-          msg ? { quoted: msg } : undefined
+      title = videoData.title;
+      thumbBuffer = await getBuffer(videoData.image || videoData.thumbnail);
+
+      const vistas = (videoData.views || 0).toLocaleString();
+      const canal = videoData.author?.name || "YouTube";
+
+      let infoMessage = `✨ ── 𝒮𝒽𝒾𝓏𝓊𝓀𝒶 𝒜𝐼 ── ✨\n\n`;
+      infoMessage += `🎬 *Tu video se está preparando*\n\n`;
+      infoMessage += `• 🏷️ *Título:* ${title}\n`;
+      infoMessage += `• 🎙️ *Canal:* ${canal}\n`;
+      infoMessage += `• ⏳ *Duración:* ${videoData.timestamp || "N/A"}\n`;
+      infoMessage += `• 👀 *Vistas:* ${vistas}\n\n`;
+      infoMessage += `> 💎 *Enviando contenido, espera un momento...*`;
+
+      await sock.sendMessage(
+        from,
+        { image: thumbBuffer, caption: infoMessage, ...global.channelInfo },
+        m ? { quoted: m } : undefined
+      );
+
+      // ✅ API NEXEVO (misma lógica que tu código, solo fijo el host)
+      const res = await fetch(
+        `${api.url}/download/y2?url=${encodeURIComponent(url)}`
+      );
+      const result = await res.json();
+
+      if (!result.status || !result.result || !result.result.url) {
+        return reply(
+          "🥀 *Ups,*\n> hubo un pequeño fallo al procesar el video."
         );
       }
 
-      // Buscar la URL de descarga (por si cambia el nombre de la llave)
-      const dlUrl =
-        data.result?.download?.url ||
-        data.result?.download?.link ||
-        data.result?.download_url ||
-        data.result?.url;
+      const { url: videoUrl } = result.result;
+      const videoBuffer = await getBuffer(videoUrl);
 
-      if (!dlUrl || !String(dlUrl).startsWith("http")) {
-        throw new Error("Vreden no devolvió link de descarga");
-      }
+      const thumb300 = await sharp(thumbBuffer)
+        .resize(300, 300)
+        .jpeg({ quality: 80 })
+        .toBuffer();
 
-      // Enviar audio por URL (igual que tu ytmp3.js)
       await sock.sendMessage(
         from,
         {
-          audio: { url: dlUrl },
-          mimetype: "audio/mpeg",
-          fileName: `${safeFileName(title)}.mp3`,
-          contextInfo: {
-            externalAdReply: {
-              title,
-              body: `⏱ ${duration}`,
-              thumbnailUrl: thumbnail || undefined,
-              sourceUrl: videoUrl,
-              mediaType: 1,
-              renderLargerThumbnail: true,
-              showAdAttribution: false,
-            },
-          },
+          video: videoBuffer,
+          mimetype: "video/mp4",
+          fileName: `${title}.mp4`,
+          jpegThumbnail: thumb300,
+          caption: `🎬 *${title}*`,
           ...global.channelInfo,
         },
-        msg ? { quoted: msg } : undefined
+        m ? { quoted: m } : undefined
       );
-
-      if (messageKey) {
-        try { await sock.sendMessage(from, { react: { text: "✅", key: messageKey } }); } catch {}
-      }
-
-    } catch (err) {
-      cooldowns.delete(from);
-      console.error("❌ YTAV (VREDEN) ERROR:", err?.message || err);
-
-      if (messageKey) {
-        try { await sock.sendMessage(from, { react: { text: "❌", key: messageKey } }); } catch {}
-      }
-
-      await sock.sendMessage(
-        from,
-        { text: "❌ No se pudo descargar el audio con Vreden.", ...global.channelInfo },
-        msg ? { quoted: msg } : undefined
+    } catch (e) {
+      console.error(e);
+      await reply(
+        "🥀 *Shizuka AI:*\n> Ha ocurrido un error inesperado al procesar el video."
       );
     }
   },
