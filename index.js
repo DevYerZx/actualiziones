@@ -1,9 +1,16 @@
-import makeWASocket, {
+// =========================
+// DVYER BOT - INDEX (FIXED)
+// Baileys v6.17.16 + ESM
+// =========================
+
+import * as baileys from "@whiskeysockets/baileys";
+const makeWASocket = baileys.default; // ✅ FIX: asegura que sea función en ESM
+const {
   useMultiFileAuthState,
   makeCacheableSignalKeyStore,
   DisconnectReason,
   fetchLatestBaileysVersion,
-} from "@whiskeysockets/baileys";
+} = baileys;
 
 import pino from "pino";
 import chalk from "chalk";
@@ -19,10 +26,20 @@ const settings = JSON.parse(fs.readFileSync("./settings/settings.json", "utf-8")
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ================= TMPDIR FIX (ayuda ENOSPC en hostings/termux) =================
+const TMP_DIR = path.join(process.cwd(), "tmp");
+try {
+  if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+} catch {}
+
+process.env.TMPDIR = TMP_DIR;
+process.env.TMP = TMP_DIR;
+process.env.TEMP = TMP_DIR;
+
 // ================= ✅ FIX RECONEXIÓN (ANTI 2+ SOCKETS) =================
-let sockGlobal = null;        // referencia al socket actual
-let conectando = false;       // candado para evitar iniciarBot() duplicado
-let inicializado = false;     // para no recargar comandos/barra cada reconexión
+let sockGlobal = null; // referencia al socket actual
+let conectando = false; // candado para evitar iniciarBot() duplicado
+let inicializado = false; // para no recargar comandos/barra cada reconexión
 
 // ================= NEWSLETTER CONFIG =================
 global.channelInfo = settings.newsletter?.enabled
@@ -38,9 +55,6 @@ global.channelInfo = settings.newsletter?.enabled
       },
     }
   : {};
-
-// Carpeta TMP para descargas
-const TMP_DIR = path.join(process.cwd(), "tmp");
 
 // Readline
 let rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -127,13 +141,13 @@ function mostrarBanner() {
 
   console.log(
     chalk.white("🤖 Bot            : ") + chalk.green(settings.botName) + "\n" +
-    chalk.white("👑 Owner          : ") + chalk.green(settings.ownerName) + "\n" +
-    chalk.white("⚙️ Prefijo         : ") + chalk.green(obtenerEtiquetaPrefijo()) + "\n" +
-    chalk.white("🗂 Comandos        : ") + chalk.yellow(comandos.size) + "\n" +
-    chalk.white("💬 Total Mensajes  : ") + chalk.cyan(totalMensajes) + "\n" +
-    chalk.white("👥 Mensajes Grupos : ") + chalk.blue(mensajesPorTipo.Grupo) + "\n" +
-    chalk.white("🗨️ Mensajes Privados : ") + chalk.green(mensajesPorTipo.Privado) + "\n" +
-    chalk.white("📝 Total Comandos Ejecutados : ") + chalk.yellow(totalComandos)
+      chalk.white("👑 Owner          : ") + chalk.green(settings.ownerName) + "\n" +
+      chalk.white("⚙️ Prefijo         : ") + chalk.green(obtenerEtiquetaPrefijo()) + "\n" +
+      chalk.white("🗂 Comandos        : ") + chalk.yellow(comandos.size) + "\n" +
+      chalk.white("💬 Total Mensajes  : ") + chalk.cyan(totalMensajes) + "\n" +
+      chalk.white("👥 Mensajes Grupos : ") + chalk.blue(mensajesPorTipo.Grupo) + "\n" +
+      chalk.white("🗨️ Mensajes Privados : ") + chalk.green(mensajesPorTipo.Privado) + "\n" +
+      chalk.white("📝 Total Comandos Ejecutados : ") + chalk.yellow(totalComandos)
   );
 
   console.log(chalk.gray("──────────────────────────────────────────────\n"));
@@ -290,6 +304,57 @@ async function enviarConsola(sock, from, n = 30) {
   await sock.sendMessage(from, { text });
 }
 
+// ================= Helpers: LISTA (categorías) + BOTONES =================
+// ✅ Lista tipo “categorías” (List Message): la opción más compatible
+global.enviarLista = async (sock, jid, opts) => {
+  const {
+    title = "Menú",
+    text = "Elige una opción:",
+    footer = settings.botName || "Bot",
+    buttonText = "Ver opciones",
+    sections = [],
+    quoted,
+  } = opts || {};
+
+  // sections ejemplo:
+  // [{ title: "Descargas", rows: [{ title:"YouTube MP4", description:"...", rowId: ".ytmp4 ..." }] }]
+
+  return sock.sendMessage(
+    jid,
+    {
+      text,
+      footer,
+      title,
+      buttonText,
+      sections,
+      ...global.channelInfo,
+    },
+    quoted
+  );
+};
+
+// ✅ Botones “quick reply”: depende del cliente, pero se intenta.
+global.enviarBotones = async (sock, jid, opts) => {
+  const {
+    text = "Elige:",
+    footer = settings.botName || "Bot",
+    buttons = [], // [{ buttonId: ".menu", buttonText: { displayText: "Menú" }, type: 1 }]
+    quoted,
+  } = opts || {};
+
+  return sock.sendMessage(
+    jid,
+    {
+      text,
+      footer,
+      buttons,
+      headerType: 1,
+      ...global.channelInfo,
+    },
+    quoted
+  );
+};
+
 // ================= INICIAR BOT =================
 async function iniciarBot() {
   // ✅ Candado: evita iniciarBot() duplicado (2+ sockets)
@@ -298,7 +363,9 @@ async function iniciarBot() {
 
   try {
     // ✅ cerrar socket anterior si existía (evita conexiones duplicadas)
-    try { sockGlobal?.end?.(); } catch {}
+    try {
+      sockGlobal?.end?.();
+    } catch {}
 
     limpiarTMP();
 
@@ -317,12 +384,18 @@ async function iniciarBot() {
     sockGlobal = makeWASocket({
       version,
       logger,
-      printQRInTerminal: false,
-      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+      printQRInTerminal: true, // ✅ terminal QR (más simple). Si usas pairing code, igual sirve.
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, logger),
+      },
+      // puedes agregar browser si quieres:
+      // browser: ["DVYER", "Chrome", "1.0.0"],
     });
 
     const sock = sockGlobal;
 
+    // Pairing code (si lo usas)
     if (!state.creds.registered) {
       console.log(chalk.yellowBright("📲 Bot no vinculado"));
 
@@ -339,14 +412,11 @@ async function iniciarBot() {
       console.log(chalk.greenBright("\n🔐 CÓDIGO DE VINCULACIÓN:\n"));
       console.log(chalk.white.bold.underline(codigo));
       console.log(chalk.yellow("WhatsApp > Dispositivos vinculados > Vincular con código\n"));
-
-      // NO cerramos rl aquí para evitar problemas en reinicios
-      // rl.close();
     }
 
     sock.ev.on("creds.update", saveCreds);
 
-    // ✅ FIX: reconexión segura + borrar sesión si 401
+    // ✅ reconexión segura + borrar sesión si 401
     sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
       if (connection === "open") {
         console.log(chalk.bgGreen.black("\n ✅ DVYER BOT CONECTADO ✅ \n"));
@@ -367,7 +437,7 @@ async function iniciarBot() {
           }
         }
 
-        // ✅ reconexión controlada (evita bucle agresivo y sockets dobles)
+        // ✅ reconexión controlada
         setTimeout(() => iniciarBot(), 1500);
       }
     });
