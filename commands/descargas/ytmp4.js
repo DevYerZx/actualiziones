@@ -10,9 +10,9 @@ const API_KEY = "may-5d597e52";
 const COOLDOWN_TIME = 15 * 1000;
 const TMP_DIR = path.join(process.cwd(), "tmp");
 
-// LIMITES
-const MAX_VIDEO_BYTES = 120 * 1024 * 1024; // 120MB video
-const MAX_DOC_BYTES = 200 * 1024 * 1024;   // 200MB documento
+// 🔥 NUEVOS LIMITES
+const MAX_VIDEO_BYTES = 70 * 1024 * 1024;    // 70MB como video normal
+const MAX_DOC_BYTES = 500 * 1024 * 1024;     // 500MB como documento
 
 const DEFAULT_QUALITY = "360p";
 const cooldowns = new Map();
@@ -143,7 +143,7 @@ export default {
       rawMp4 = path.join(TMP_DIR, `${Date.now()}_raw.mp4`);
       finalMp4 = path.join(TMP_DIR, `${Date.now()}_final.mp4`);
 
-      // 🔎 Buscar si no es link
+      // Buscar si no es link
       if (!isHttpUrl(query)) {
         const search = await yts(query);
         const first = search?.videos?.[0];
@@ -161,7 +161,7 @@ export default {
         thumbnail = first.thumbnail;
       }
 
-      // Si es link directo, obtener info
+      // Si es link directo
       if (!thumbnail) {
         const search = await yts(videoUrl);
         const first = search?.videos?.[0];
@@ -171,7 +171,7 @@ export default {
         }
       }
 
-      // ✅ MENSAJE ÚNICO CON IMAGEN
+      // Mensaje único con imagen
       await sock.sendMessage(
         from,
         {
@@ -186,7 +186,7 @@ export default {
       const info = await fetchDirectMediaUrl({ videoUrl, quality });
       title = safeFileName(info.title);
 
-      // DESCARGA
+      // Descarga
       await downloadToFile(info.directUrl, rawMp4);
       await ffmpegFaststart(rawMp4, finalMp4);
 
@@ -198,9 +198,9 @@ export default {
         throw new Error("Archivo inválido");
 
       if (size > MAX_DOC_BYTES)
-        throw new Error("Supera 200MB");
+        throw new Error("Supera 500MB");
 
-      // ENVÍO FINAL
+      // Envío final
       if (size <= MAX_VIDEO_BYTES) {
         await sock.sendMessage(
           from,
