@@ -1,5 +1,3 @@
-//hola 
-
 import makeWASocket, {
   useMultiFileAuthState,
   makeCacheableSignalKeyStore,
@@ -21,6 +19,11 @@ const settings = JSON.parse(fs.readFileSync("./settings/settings.json", "utf-8")
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ================= ✅ FIX RECONEXIÓN (ANTI 2+ SOCKETS) =================
+let sockGlobal = null;        // referencia al socket actual
+let conectando = false;       // candado para evitar iniciarBot() duplicado
+let inicializado = false;     // para no recargar comandos/barra cada reconexión
+
 // ================= NEWSLETTER CONFIG =================
 global.channelInfo = settings.newsletter?.enabled
   ? {
@@ -40,7 +43,7 @@ global.channelInfo = settings.newsletter?.enabled
 const TMP_DIR = path.join(process.cwd(), "tmp");
 
 // Readline
-const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+let rl = readline.createInterface({ input: process.stdin, output: process.stdout });
 const preguntar = (q) => new Promise((r) => rl.question(q, r));
 
 // Mapa de comandos
@@ -104,9 +107,6 @@ process.on("uncaughtException", (err) => {
 
 // ================= ✅ NORMALIZAR NÚMEROS (FIX OWNER) =================
 function normalizarNumero(jid) {
-  // "51907376960@s.whatsapp.net" -> "51907376960"
-  // "51907376960:16@s.whatsapp.net" -> "51907376960"
-  // "+51907376960" -> "51907376960"
   return String(jid || "")
     .split("@")[0]
     .split(":")[0]
@@ -292,231 +292,272 @@ async function enviarConsola(sock, from, n = 30) {
 
 // ================= INICIAR BOT =================
 async function iniciarBot() {
-  limpiarTMP();
-  await barraCarga();
-  await cargarComandos();
-  mostrarBanner();
+  // ✅ Candado: evita iniciarBot() duplicado (2+ sockets)
+  if (conectando) return;
+  conectando = true;
 
-  const { state, saveCreds } = await useMultiFileAuthState(CARPETA_AUTH);
-  const { version } = await fetchLatestBaileysVersion();
+  try {
+    // ✅ cerrar socket anterior si existía (evita conexiones duplicadas)
+    try { sockGlobal?.end?.(); } catch {}
 
-  const sock = makeWASocket({
-    version,
-    logger,
-    printQRInTerminal: false,
-    auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
-  });
+    limpiarTMP();
 
-  if (!state.creds.registered) {
-    console.log(chalk.yellowBright("📲 Bot no vinculado"));
-    const numero = await preguntar("👉 Ingresa tu número (ej: 519XXXXXXXX): ");
-    const codigo = await sock.requestPairingCode(numero.trim());
-
-    console.log(chalk.greenBright("\n🔐 CÓDIGO DE VINCULACIÓN:\n"));
-    console.log(chalk.white.bold.underline(codigo));
-    console.log(chalk.yellow("WhatsApp > Dispositivos vinculados > Vincular con código\n"));
-    rl.close();
-  }
-
-  sock.ev.on("creds.update", saveCreds);
-
-  sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
-    if (connection === "open") {
-      console.log(chalk.bgGreen.black("\n ✅ DVYER BOT CONECTADO ✅ \n"));
+    // ✅ solo la primera vez: barra + comandos
+    if (!inicializado) {
+      await barraCarga();
+      await cargarComandos();
+      inicializado = true;
     }
-    if (connection === "close") {
-      const code = lastDisconnect?.error?.output?.statusCode;
-      console.log(chalk.bgRed.black(` ❌ Conexión cerrada (${code}) ❌ `));
-      if (code !== DisconnectReason.loggedOut) iniciarBot();
-    }
-  });
-
-  // ================= WELCOME / DESPEDIDA =================
-  sock.ev.on("group-participants.update", async (update) => {
-    for (const cmd of comandos.values()) {
-      if (typeof cmd.onGroupUpdate === "function") {
-        try {
-          await cmd.onGroupUpdate({ sock, update, settings });
-        } catch (e) {
-          console.error("❌ Error en onGroupUpdate:", e);
-        }
-      }
-    }
-  });
-
-  // ================= MENSAJES =================
-  sock.ev.on("messages.upsert", async ({ messages }) => {
-    const msg = messages[0];
-    if (!msg?.message || msg.key.fromMe) return;
-
-    const from = msg.key.remoteJid;
-    const texto = obtenerTexto(msg.message);
-    if (!texto) return;
-
-    totalMensajes++;
-    const tipo = tipoChat(from);
-    mensajesPorTipo[tipo]++;
-
-    const idCorto = from.split("@")[0];
-    ultimosMensajes.push(
-      (tipo === "Grupo" ? chalk.bgBlue.black : chalk.bgGreen.black)(` ${tipo} `) +
-        chalk.bgWhite.black(` ${idCorto} `) +
-        chalk.bgBlack.white(` ${texto} `)
-    );
-    if (ultimosMensajes.length > 10) ultimosMensajes.shift();
 
     mostrarBanner();
 
-    // ================= 🔥 EVENTOS AUTOMÁTICOS =================
-    const esGrupo = from.endsWith("@g.us");
-    const esPrivado = from.endsWith("@s.whatsapp.net");
+    const { state, saveCreds } = await useMultiFileAuthState(CARPETA_AUTH);
+    const { version } = await fetchLatestBaileysVersion();
 
-    const sender = msg.key.participant || from;
+    sockGlobal = makeWASocket({
+      version,
+      logger,
+      printQRInTerminal: false,
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+    });
 
-    // ✅ FIX OWNER
-    const numeroSender = normalizarNumero(sender);
+    const sock = sockGlobal;
 
-    const owners = Array.isArray(settings.ownerNumbers)
-      ? settings.ownerNumbers
-      : typeof settings.ownerNumber === "string"
-      ? [settings.ownerNumber]
-      : [];
+    if (!state.creds.registered) {
+      console.log(chalk.yellowBright("📲 Bot no vinculado"));
 
-    const ownersNorm = owners.map(normalizarNumero);
-    const esOwner = ownersNorm.includes(numeroSender);
-
-    // (Opcional debug 1 vez)
-    // console.log("[OWNER CHECK]", { sender, numeroSender, ownersNorm, esOwner });
-
-    let esAdmin = false;
-
-    if (esGrupo) {
+      // Si el rl fue cerrado en un intento anterior, recrearlo
       try {
-        const metadata = await sock.groupMetadata(from);
-        const participantes = metadata.participants;
-        const usuario = participantes.find((p) => p.id === sender);
-        esAdmin = usuario?.admin === "admin" || usuario?.admin === "superadmin";
-      } catch (e) {
-        console.error("❌ Error obteniendo metadata del grupo:", e);
-      }
+        if (rl?.closed) {
+          rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        }
+      } catch {}
+
+      const numero = await preguntar("👉 Ingresa tu número (ej: 519XXXXXXXX): ");
+      const codigo = await sock.requestPairingCode(numero.trim());
+
+      console.log(chalk.greenBright("\n🔐 CÓDIGO DE VINCULACIÓN:\n"));
+      console.log(chalk.white.bold.underline(codigo));
+      console.log(chalk.yellow("WhatsApp > Dispositivos vinculados > Vincular con código\n"));
+
+      // NO cerramos rl aquí para evitar problemas en reinicios
+      // rl.close();
     }
 
-    // ================= COMANDOS INTERNOS: .consola / .logs / .errores =================
-    const prefijos = obtenerPrefijos();
-    const modoSinPrefijo = esModoSinPrefijo();
-    const txt = texto.trim();
+    sock.ev.on("creds.update", saveCreds);
 
-    const internalMatch = (() => {
+    // ✅ FIX: reconexión segura + borrar sesión si 401
+    sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
+      if (connection === "open") {
+        console.log(chalk.bgGreen.black("\n ✅ DVYER BOT CONECTADO ✅ \n"));
+        return;
+      }
+
+      if (connection === "close") {
+        const code = lastDisconnect?.error?.output?.statusCode;
+        console.log(chalk.bgRed.black(` ❌ Conexión cerrada (${code}) ❌ `));
+
+        // ✅ 401 / loggedOut => borrar dvyer-session y volver a vincular
+        if (code === 401 || code === DisconnectReason.loggedOut) {
+          console.log(chalk.redBright("🔐 Sesión inválida (401). Borrando dvyer-session para volver a vincular..."));
+          try {
+            fs.rmSync(CARPETA_AUTH, { recursive: true, force: true });
+          } catch (e) {
+            console.error(chalk.red("❌ No se pudo borrar la sesión:"), e?.message);
+          }
+        }
+
+        // ✅ reconexión controlada (evita bucle agresivo y sockets dobles)
+        setTimeout(() => iniciarBot(), 1500);
+      }
+    });
+
+    // ================= WELCOME / DESPEDIDA =================
+    sock.ev.on("group-participants.update", async (update) => {
+      for (const cmd of comandos.values()) {
+        if (typeof cmd.onGroupUpdate === "function") {
+          try {
+            await cmd.onGroupUpdate({ sock, update, settings });
+          } catch (e) {
+            console.error("❌ Error en onGroupUpdate:", e);
+          }
+        }
+      }
+    });
+
+    // ================= MENSAJES =================
+    sock.ev.on("messages.upsert", async ({ messages }) => {
+      const msg = messages[0];
+      if (!msg?.message || msg.key.fromMe) return;
+
+      const from = msg.key.remoteJid;
+      const texto = obtenerTexto(msg.message);
+      if (!texto) return;
+
+      totalMensajes++;
+      const tipo = tipoChat(from);
+      mensajesPorTipo[tipo]++;
+
+      const idCorto = from.split("@")[0];
+      ultimosMensajes.push(
+        (tipo === "Grupo" ? chalk.bgBlue.black : chalk.bgGreen.black)(` ${tipo} `) +
+          chalk.bgWhite.black(` ${idCorto} `) +
+          chalk.bgBlack.white(` ${texto} `)
+      );
+      if (ultimosMensajes.length > 10) ultimosMensajes.shift();
+
+      mostrarBanner();
+
+      // ================= 🔥 EVENTOS AUTOMÁTICOS =================
+      const esGrupo = from.endsWith("@g.us");
+      const esPrivado = from.endsWith("@s.whatsapp.net");
+
+      const sender = msg.key.participant || from;
+
+      // ✅ FIX OWNER
+      const numeroSender = normalizarNumero(sender);
+
+      const owners = Array.isArray(settings.ownerNumbers)
+        ? settings.ownerNumbers
+        : typeof settings.ownerNumber === "string"
+        ? [settings.ownerNumber]
+        : [];
+
+      const ownersNorm = owners.map(normalizarNumero);
+      const esOwner = ownersNorm.includes(numeroSender);
+
+      let esAdmin = false;
+
+      if (esGrupo) {
+        try {
+          const metadata = await sock.groupMetadata(from);
+          const participantes = metadata.participants;
+          const usuario = participantes.find((p) => p.id === sender);
+          esAdmin = usuario?.admin === "admin" || usuario?.admin === "superadmin";
+        } catch (e) {
+          console.error("❌ Error obteniendo metadata del grupo:", e);
+        }
+      }
+
+      // ================= COMANDOS INTERNOS: .consola / .logs / .errores =================
+      const prefijos = obtenerPrefijos();
+      const modoSinPrefijo = esModoSinPrefijo();
+      const txt = texto.trim();
+
+      const internalMatch = (() => {
+        if (!modoSinPrefijo) {
+          for (const p of prefijos) {
+            if (txt.startsWith(p)) return { p, body: txt.slice(p.length).trim() };
+          }
+          return null;
+        }
+        return { p: null, body: txt };
+      })();
+
+      if (internalMatch?.body) {
+        const parts = internalMatch.body.split(/\s+/);
+        const c = (parts[0] || "").toLowerCase();
+        const n = parts[1];
+
+        if (["consola", "logs", "errores"].includes(c)) {
+          if (!esOwner) {
+            return sock.sendMessage(from, { text: "👑 Solo el owner puede ver la consola." });
+          }
+          return await enviarConsola(sock, from, n || 30);
+        }
+
+        if (["clearconsola", "clearlogs"].includes(c)) {
+          if (!esOwner) {
+            return sock.sendMessage(from, { text: "👑 Solo el owner puede limpiar la consola." });
+          }
+          global.consoleBuffer = [];
+          return sock.sendMessage(from, { text: "✅ Consola limpiada." });
+        }
+      }
+
+      // ================= Ejecutar onMessage de comandos =================
+      let bloqueado = false;
+      for (const cmd of comandos.values()) {
+        if (typeof cmd.onMessage === "function") {
+          try {
+            const r = await cmd.onMessage({
+              sock,
+              msg,
+              from,
+              esGrupo,
+              esAdmin,
+              esOwner,
+              settings,
+              comandos,
+            });
+            if (r === true) {
+              bloqueado = true;
+              break;
+            }
+          } catch (e) {
+            console.error("❌ Error en onMessage:", e);
+          }
+        }
+      }
+      if (bloqueado) return;
+
+      // ================= SISTEMA DE COMANDOS =================
+      let textoComando = null;
+
       if (!modoSinPrefijo) {
         for (const p of prefijos) {
-          if (txt.startsWith(p)) return { p, body: txt.slice(p.length).trim() };
-        }
-        return null;
-      }
-      return { p: null, body: txt };
-    })();
-
-    if (internalMatch?.body) {
-      const parts = internalMatch.body.split(/\s+/);
-      const c = (parts[0] || "").toLowerCase();
-      const n = parts[1];
-
-      if (["consola", "logs", "errores"].includes(c)) {
-        if (!esOwner) {
-          return sock.sendMessage(from, { text: "👑 Solo el owner puede ver la consola." });
-        }
-        return await enviarConsola(sock, from, n || 30);
-      }
-
-      if (["clearconsola", "clearlogs"].includes(c)) {
-        if (!esOwner) {
-          return sock.sendMessage(from, { text: "👑 Solo el owner puede limpiar la consola." });
-        }
-        global.consoleBuffer = [];
-        return sock.sendMessage(from, { text: "✅ Consola limpiada." });
-      }
-    }
-
-    // ================= Ejecutar onMessage de comandos =================
-    let bloqueado = false;
-    for (const cmd of comandos.values()) {
-      if (typeof cmd.onMessage === "function") {
-        try {
-          const r = await cmd.onMessage({
-            sock,
-            msg,
-            from,
-            esGrupo,
-            esAdmin,
-            esOwner,
-            settings,
-            comandos,
-          });
-          if (r === true) {
-            bloqueado = true;
+          if (txt.startsWith(p)) {
+            textoComando = txt.slice(p.length).trim();
             break;
           }
-        } catch (e) {
-          console.error("❌ Error en onMessage:", e);
         }
+        if (!textoComando) return;
+      } else {
+        const posible = txt.split(/\s+/)[0]?.toLowerCase();
+        if (posible && comandos.has(posible)) textoComando = txt;
+        else return;
       }
-    }
-    if (bloqueado) return;
 
-    // ================= SISTEMA DE COMANDOS =================
-    let textoComando = null;
+      const a = textoComando.split(/\s+/);
+      const comando = a.shift()?.toLowerCase();
+      const cmd = comando ? comandos.get(comando) : null;
+      if (!cmd) return;
 
-    if (!modoSinPrefijo) {
-      for (const p of prefijos) {
-        if (txt.startsWith(p)) {
-          textoComando = txt.slice(p.length).trim();
-          break;
-        }
+      // ================= PERMISOS =================
+      if (cmd.groupOnly && !esGrupo) {
+        return await sock.sendMessage(from, { text: "❌ Este comando solo funciona en grupos." });
       }
-      if (!textoComando) return;
-    } else {
-      const posible = txt.split(/\s+/)[0]?.toLowerCase();
-      if (posible && comandos.has(posible)) textoComando = txt;
-      else return;
-    }
+      if (cmd.privateOnly && !esPrivado) {
+        return await sock.sendMessage(from, { text: "❌ Este comando solo funciona en privado." });
+      }
+      if (cmd.ownerOnly && !esOwner) {
+        return await sock.sendMessage(from, { text: "👑 Solo el owner puede usar este comando." });
+      }
+      if (cmd.adminOnly && !esAdmin) {
+        return await sock.sendMessage(from, { text: "⚠️ Solo los administradores pueden usar este comando." });
+      }
 
-    const a = textoComando.split(/\s+/);
-    const comando = a.shift()?.toLowerCase();
-    const cmd = comando ? comandos.get(comando) : null;
-    if (!cmd) return;
+      totalComandos++;
 
-    // ================= PERMISOS =================
-    if (cmd.groupOnly && !esGrupo) {
-      return await sock.sendMessage(from, { text: "❌ Este comando solo funciona en grupos." });
-    }
-    if (cmd.privateOnly && !esPrivado) {
-      return await sock.sendMessage(from, { text: "❌ Este comando solo funciona en privado." });
-    }
-    if (cmd.ownerOnly && !esOwner) {
-      return await sock.sendMessage(from, { text: "👑 Solo el owner puede usar este comando." });
-    }
-    if (cmd.adminOnly && !esAdmin) {
-      return await sock.sendMessage(from, { text: "⚠️ Solo los administradores pueden usar este comando." });
-    }
-
-    totalComandos++;
-
-    try {
-      await cmd.run({
-        sock,
-        msg,
-        from,
-        args: a,
-        settings,
-        comandos,
-        esOwner,
-        esAdmin,
-        esGrupo,
-      });
-    } catch (e) {
-      console.error(`❌ Error ejecutando ${comando}:`, e);
-    }
-  });
+      try {
+        await cmd.run({
+          sock,
+          msg,
+          from,
+          args: a,
+          settings,
+          comandos,
+          esOwner,
+          esAdmin,
+          esGrupo,
+        });
+      } catch (e) {
+        console.error(`❌ Error ejecutando ${comando}:`, e);
+      }
+    });
+  } finally {
+    conectando = false;
+  }
 }
 
 iniciarBot();
@@ -526,4 +567,3 @@ process.on("SIGINT", () => {
   console.log(chalk.bgYellow.black("\n👋 DVYER BOT apagado"));
   process.exit(0);
 });
-
