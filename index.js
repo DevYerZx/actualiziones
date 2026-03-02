@@ -1,11 +1,17 @@
 // =========================
-// DVYER BOT - INDEX (FIXED)
+// DVYER BOT - INDEX (STABLE + COMPAT)
 // Baileys v6.17.16 + ESM
+// Mantiene tu lógica original de vinculación
+// + Fix makeWASocket en hosting
+// + Helpers lista/botones
 // =========================
 
 import * as baileys from "@whiskeysockets/baileys";
 
-// ✅ Agarra makeWASocket venga como venga (named / default)
+// ✅ Mantener compatibilidad con TODOS los hostings:
+// - algunos entregan makeWASocket como named export
+// - otros como default export
+// - otros como default.makeWASocket
 const makeWASocket =
   (typeof baileys.makeWASocket === "function" && baileys.makeWASocket) ||
   (typeof baileys.default === "function" && baileys.default) ||
@@ -15,9 +21,10 @@ if (typeof makeWASocket !== "function") {
   console.error("❌ Baileys exports keys:", Object.keys(baileys));
   console.error("❌ baileys.default type:", typeof baileys.default);
   console.error("❌ baileys.makeWASocket type:", typeof baileys.makeWASocket);
-  throw new Error("makeWASocket no es función. Baileys no está exportando correctamente en este entorno.");
+  throw new Error("makeWASocket is not a function (export no compatible en este hosting).");
 }
 
+// Named exports (tal cual tu index original)
 const {
   useMultiFileAuthState,
   makeCacheableSignalKeyStore,
@@ -39,20 +46,20 @@ const settings = JSON.parse(fs.readFileSync("./settings/settings.json", "utf-8")
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ================= TMPDIR FIX (ayuda ENOSPC en hostings/termux) =================
+// ================= TMPDIR FIX (ENOSPC) =================
+// ✅ No cambia tu socket, solo evita errores de temp/espacio en hosting/termux
 const TMP_DIR = path.join(process.cwd(), "tmp");
 try {
   if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 } catch {}
-
 process.env.TMPDIR = TMP_DIR;
 process.env.TMP = TMP_DIR;
 process.env.TEMP = TMP_DIR;
 
 // ================= ✅ FIX RECONEXIÓN (ANTI 2+ SOCKETS) =================
-let sockGlobal = null; // referencia al socket actual
-let conectando = false; // candado para evitar iniciarBot() duplicado
-let inicializado = false; // para no recargar comandos/barra cada reconexión
+let sockGlobal = null;        // referencia al socket actual
+let conectando = false;       // candado para evitar iniciarBot() duplicado
+let inicializado = false;     // para no recargar comandos/barra cada reconexión
 
 // ================= NEWSLETTER CONFIG =================
 global.channelInfo = settings.newsletter?.enabled
@@ -154,13 +161,13 @@ function mostrarBanner() {
 
   console.log(
     chalk.white("🤖 Bot            : ") + chalk.green(settings.botName) + "\n" +
-      chalk.white("👑 Owner          : ") + chalk.green(settings.ownerName) + "\n" +
-      chalk.white("⚙️ Prefijo         : ") + chalk.green(obtenerEtiquetaPrefijo()) + "\n" +
-      chalk.white("🗂 Comandos        : ") + chalk.yellow(comandos.size) + "\n" +
-      chalk.white("💬 Total Mensajes  : ") + chalk.cyan(totalMensajes) + "\n" +
-      chalk.white("👥 Mensajes Grupos : ") + chalk.blue(mensajesPorTipo.Grupo) + "\n" +
-      chalk.white("🗨️ Mensajes Privados : ") + chalk.green(mensajesPorTipo.Privado) + "\n" +
-      chalk.white("📝 Total Comandos Ejecutados : ") + chalk.yellow(totalComandos)
+    chalk.white("👑 Owner          : ") + chalk.green(settings.ownerName) + "\n" +
+    chalk.white("⚙️ Prefijo         : ") + chalk.green(obtenerEtiquetaPrefijo()) + "\n" +
+    chalk.white("🗂 Comandos        : ") + chalk.yellow(comandos.size) + "\n" +
+    chalk.white("💬 Total Mensajes  : ") + chalk.cyan(totalMensajes) + "\n" +
+    chalk.white("👥 Mensajes Grupos : ") + chalk.blue(mensajesPorTipo.Grupo) + "\n" +
+    chalk.white("🗨️ Mensajes Privados : ") + chalk.green(mensajesPorTipo.Privado) + "\n" +
+    chalk.white("📝 Total Comandos Ejecutados : ") + chalk.yellow(totalComandos)
   );
 
   console.log(chalk.gray("──────────────────────────────────────────────\n"));
@@ -318,6 +325,7 @@ async function enviarConsola(sock, from, n = 30) {
 }
 
 // ================= Helpers: LISTA (categorías) + BOTONES =================
+// ✅ List Message (categorías) - lo más compatible
 global.enviarLista = async (sock, jid, opts) => {
   const {
     title = "Menú",
@@ -331,9 +339,9 @@ global.enviarLista = async (sock, jid, opts) => {
   return sock.sendMessage(
     jid,
     {
+      title,
       text,
       footer,
-      title,
       buttonText,
       sections,
       ...global.channelInfo,
@@ -342,6 +350,7 @@ global.enviarLista = async (sock, jid, opts) => {
   );
 };
 
+// ✅ Botones quick reply (depende del cliente)
 global.enviarBotones = async (sock, jid, opts) => {
   const {
     text = "Elige:",
@@ -365,16 +374,17 @@ global.enviarBotones = async (sock, jid, opts) => {
 
 // ================= INICIAR BOT =================
 async function iniciarBot() {
+  // ✅ Candado: evita iniciarBot() duplicado (2+ sockets)
   if (conectando) return;
   conectando = true;
 
   try {
-    try {
-      sockGlobal?.end?.();
-    } catch {}
+    // ✅ cerrar socket anterior si existía (evita conexiones duplicadas)
+    try { sockGlobal?.end?.(); } catch {}
 
     limpiarTMP();
 
+    // ✅ solo la primera vez: barra + comandos
     if (!inicializado) {
       await barraCarga();
       await cargarComandos();
@@ -386,20 +396,12 @@ async function iniciarBot() {
     const { state, saveCreds } = await useMultiFileAuthState(CARPETA_AUTH);
     const { version } = await fetchLatestBaileysVersion();
 
+    // ✅ OJO: aquí NO tocamos tu config del socket (para no romper vinculación)
     sockGlobal = makeWASocket({
       version,
       logger,
-      printQRInTerminal: false, // pairing code
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, logger),
-      },
-
-      // ✅ opciones recomendadas para compatibilidad
-      browser: ["DVYER-BOT", "Chrome", "1.0.0"],
-      syncFullHistory: false,
-      markOnlineOnConnect: false,
-      generateHighQualityLinkPreview: false,
+      printQRInTerminal: false,
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
     });
 
     const sock = sockGlobal;
@@ -407,16 +409,15 @@ async function iniciarBot() {
     if (!state.creds.registered) {
       console.log(chalk.yellowBright("📲 Bot no vinculado"));
 
+      // Si el rl fue cerrado en un intento anterior, recrearlo
       try {
         if (rl?.closed) {
           rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         }
       } catch {}
 
-      const numeroRaw = await preguntar("👉 Ingresa tu número (ej: 519XXXXXXXX): ");
-      const numero = numeroRaw.replace(/[^\d]/g, ""); // ✅ solo dígitos
-
-      const codigo = await sock.requestPairingCode(numero);
+      const numero = await preguntar("👉 Ingresa tu número (ej: 519XXXXXXXX): ");
+      const codigo = await sock.requestPairingCode(numero.trim());
 
       console.log(chalk.greenBright("\n🔐 CÓDIGO DE VINCULACIÓN:\n"));
       console.log(chalk.white.bold.underline(codigo));
@@ -425,6 +426,7 @@ async function iniciarBot() {
 
     sock.ev.on("creds.update", saveCreds);
 
+    // ✅ FIX: reconexión segura + borrar sesión si 401
     sock.ev.on("connection.update", ({ connection, lastDisconnect }) => {
       if (connection === "open") {
         console.log(chalk.bgGreen.black("\n ✅ DVYER BOT CONECTADO ✅ \n"));
@@ -435,6 +437,7 @@ async function iniciarBot() {
         const code = lastDisconnect?.error?.output?.statusCode;
         console.log(chalk.bgRed.black(` ❌ Conexión cerrada (${code}) ❌ `));
 
+        // ✅ 401 / loggedOut => borrar dvyer-session y volver a vincular
         if (code === 401 || code === DisconnectReason.loggedOut) {
           console.log(chalk.redBright("🔐 Sesión inválida (401). Borrando dvyer-session para volver a vincular..."));
           try {
@@ -444,6 +447,7 @@ async function iniciarBot() {
           }
         }
 
+        // ✅ reconexión controlada (evita bucle agresivo y sockets dobles)
         setTimeout(() => iniciarBot(), 1500);
       }
     });
@@ -484,11 +488,13 @@ async function iniciarBot() {
 
       mostrarBanner();
 
+      // ================= 🔥 EVENTOS AUTOMÁTICOS =================
       const esGrupo = from.endsWith("@g.us");
       const esPrivado = from.endsWith("@s.whatsapp.net");
 
       const sender = msg.key.participant || from;
 
+      // ✅ FIX OWNER
       const numeroSender = normalizarNumero(sender);
 
       const owners = Array.isArray(settings.ownerNumbers)
