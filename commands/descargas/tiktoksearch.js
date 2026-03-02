@@ -1,13 +1,15 @@
 import axios from "axios";
 
 export default {
-  name: "tiktoksearch",
-  command: ["ttsearch", "tiktoksearch", "tks", "tsearch"],
+  name: "ttsearch",
+  command: ["ttsearch", "tiktok", "tt"],
   category: "descargas",
-  desc: "Busca videos en TikTok. Uso: .ttsearch <texto>",
+  desc: "Busca videos de TikTok y envía 2 resultados",
 
   run: async ({ sock, msg, from, args, settings }) => {
+
     const q = args.join(" ").trim();
+
     if (!q) {
       return sock.sendMessage(
         from,
@@ -17,10 +19,12 @@ export default {
     }
 
     try {
-      const url = `https://nexevo.onrender.com/search/tiktok?q=${encodeURIComponent(q)}`;
-      const { data } = await axios.get(url, { timeout: 60000 });
 
-      if (!data?.status || !Array.isArray(data?.result) || data.result.length === 0) {
+      const api = `https://nexevo.onrender.com/search/tiktok?q=${encodeURIComponent(q)}`;
+
+      const { data } = await axios.get(api);
+
+      if (!data?.status || !data?.result?.length) {
         return sock.sendMessage(
           from,
           { text: "❌ No encontré resultados.", ...global.channelInfo },
@@ -28,33 +32,34 @@ export default {
         );
       }
 
-      const results = data.result.slice(0, 5);
+      const results = data.result.slice(0, 2); // solo 2 videos
 
-      let text = `🔎 *TikTok Search*\n📌 *Query:* ${q}\n\n`;
+      for (const v of results) {
 
-      results.forEach((v, i) => {
-        const title = (v.title || "Sin título").trim();
-        const dur = typeof v.duration === "number" ? `${v.duration}s` : "—";
-        const views = v.play_count ? `${v.play_count}` : "—";
-        const author = v?.author?.unique_id ? `@${v.author.unique_id}` : "—";
+        const title = v.title || "Video TikTok";
+        const author = v?.author?.unique_id || "usuario";
 
-        text +=
-          `*${i + 1}.* ${title}\n` +
-          `👤 ${author} | ⏱ ${dur} | 👁 ${views}\n` +
-          `▶️ *Sin marca:* ${v.play}\n` +
-          `💧 *Con marca:* ${v.wmplay}\n\n`;
-      });
+        await sock.sendMessage(
+          from,
+          {
+            video: { url: v.play },
+            caption: `🎬 *${title}*\n👤 @${author}`,
+            ...global.channelInfo
+          },
+          { quoted: msg }
+        );
 
-      text += `✅ (TikWM bloquea miniaturas con Cloudflare, por eso no envío el cover)\n`;
+      }
 
-      return sock.sendMessage(from, { text, ...global.channelInfo }, { quoted: msg });
     } catch (e) {
-      console.error("tiktoksearch error:", e?.message || e);
-      return sock.sendMessage(
+
+      console.error("Error ejecutando ttsearch:", e);
+
+      await sock.sendMessage(
         from,
-        { text: "❌ Error consultando la API de TikTok.", ...global.channelInfo },
+        { text: "❌ Error obteniendo videos de TikTok.", ...global.channelInfo },
         { quoted: msg }
       );
     }
-  },
+  }
 };
