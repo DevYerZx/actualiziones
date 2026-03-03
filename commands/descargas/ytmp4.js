@@ -5,7 +5,24 @@ import yts from "yt-search";
 import { execSync } from "child_process";
 
 const API_URL = "https://mayapi.ooguy.com/ytdl";
-const API_KEY = "may-ad025b11";
+
+// 🔁 ROTACIÓN DE API KEYS
+const API_KEYS = [
+  "may-ad025b11",
+  "may-3e5a03fa",
+  "may-1285f1e9",
+  "may-5793b618",
+  "may-72e941fc",
+  "may-5d597e52"
+];
+
+let apiIndex = 0;
+
+function getNextApiKey() {
+  const key = API_KEYS[apiIndex];
+  apiIndex = (apiIndex + 1) % API_KEYS.length;
+  return key;
+}
 
 const COOLDOWN_TIME = 15 * 1000;
 const DEFAULT_QUALITY = "360p";
@@ -13,14 +30,14 @@ const DEFAULT_QUALITY = "360p";
 const TMP_DIR = path.join(process.cwd(), "tmp");
 
 // límites
-const MAX_VIDEO_BYTES = 70 * 1024 * 1024;        // 70MB como video normal
-const MAX_DOC_BYTES = 2 * 1024 * 1024 * 1024;    // 2GB como documento (depende de WA)
-const MIN_FREE_BYTES = 350 * 1024 * 1024;        // mínimo recomendado libre antes de bajar (350MB)
-const MIN_VALID_BYTES = 300000;                  // 300KB mínimo para “archivo válido”
-const CLEANUP_MAX_AGE_MS = 2 * 60 * 60 * 1000;   // borra tmp > 2 horas
+const MAX_VIDEO_BYTES = 70 * 1024 * 1024;        
+const MAX_DOC_BYTES = 2 * 1024 * 1024 * 1024;    
+const MIN_FREE_BYTES = 350 * 1024 * 1024;        
+const MIN_VALID_BYTES = 300000;                  
+const CLEANUP_MAX_AGE_MS = 2 * 60 * 60 * 1000;   
 
 const cooldowns = new Map();
-const locks = new Set(); // evita 2 descargas simultáneas por chat
+const locks = new Set();
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -68,7 +85,7 @@ function getYoutubeId(url) {
   }
 }
 
-// --------- Limpieza automática de temporales ----------
+// --------- Limpieza automática ----------
 function cleanupTmp(maxAgeMs = CLEANUP_MAX_AGE_MS) {
   try {
     const now = Date.now();
@@ -82,10 +99,9 @@ function cleanupTmp(maxAgeMs = CLEANUP_MAX_AGE_MS) {
   } catch {}
 }
 
-// --------- Espacio libre (Linux/Android/Termux) ----------
+// --------- Espacio libre ----------
 function getFreeBytes(dir) {
   try {
-    // df -k => kilobytes disponibles en la partición
     const out = execSync(`df -k "${dir}" | tail -1 | awk '{print $4}'`).toString().trim();
     const freeKb = Number(out);
     return Number.isFinite(freeKb) ? freeKb * 1024 : null;
@@ -94,22 +110,35 @@ function getFreeBytes(dir) {
   }
 }
 
-// --------- API y metadata ----------
+// 🔁 FUNCIÓN MODIFICADA SOLO PARA ROTACIÓN
 async function fetchDirectMediaUrl({ videoUrl, quality }) {
-  const { data } = await axios.get(API_URL, {
-    timeout: 25000,
-    params: { url: videoUrl, quality, apikey: API_KEY },
-    validateStatus: (s) => s >= 200 && s < 500,
-  });
+  let lastError = null;
 
-  if (!data?.status || !data?.result?.url) {
-    throw new Error(data?.message || "API inválida o sin URL directa.");
+  for (let i = 0; i < API_KEYS.length; i++) {
+    const currentKey = getNextApiKey();
+
+    try {
+      const { data } = await axios.get(API_URL, {
+        timeout: 25000,
+        params: { url: videoUrl, quality, apikey: currentKey },
+        validateStatus: (s) => s >= 200 && s < 500,
+      });
+
+      if (data?.status && data?.result?.url) {
+        return {
+          title: data?.result?.title || "video",
+          directUrl: data.result.url,
+        };
+      }
+
+      lastError = new Error(data?.message || "API sin URL válida");
+
+    } catch (err) {
+      lastError = err;
+    }
   }
 
-  return {
-    title: data?.result?.title || "video",
-    directUrl: data.result.url,
-  };
+  throw new Error(lastError?.message || "Todas las API Keys fallaron.");
 }
 
 async function resolveVideoInfo(queryOrUrl) {
@@ -147,7 +176,7 @@ async function headContentLength(url) {
   }
 }
 
-// --------- Intento 1: enviar por URL (sin disco) ----------
+// --------- Intento 1: enviar por URL ----------
 async function trySendByUrl(sock, from, quoted, directUrl, title) {
   try {
     await sock.sendMessage(from, {
@@ -168,7 +197,6 @@ async function trySendByUrl(sock, from, quoted, directUrl, title) {
       }, quoted);
       return "doc-url";
     } catch (e2) {
-      // si falla url, devolvemos error para fallback a archivo
       const err = new Error(`No se pudo enviar por URL: ${e2?.message || e2}`);
       err._cause1 = e1;
       err._cause2 = e2;
@@ -177,7 +205,6 @@ async function trySendByUrl(sock, from, quoted, directUrl, title) {
   }
 }
 
-// --------- Fallback 2: stream a archivo CONTROLADO + envío + limpieza ----------
 async function downloadToFileWithLimit(directUrl, outPath, maxBytes) {
   const partPath = `${outPath}.part`;
   try { if (fs.existsSync(partPath)) fs.unlinkSync(partPath); } catch {}
@@ -260,12 +287,10 @@ export default {
     const msg = ctx.m || ctx.msg || null;
     const userId = from;
 
-    // evita 2 descargas a la vez en el mismo chat
     if (locks.has(from)) {
       return sock.sendMessage(from, { text: "⏳ Ya estoy procesando otro video aquí. Espera un momento.", ...global.channelInfo });
     }
 
-    // cooldown
     const until = cooldowns.get(userId);
     if (until && until > Date.now()) {
       return sock.sendMessage(from, {
@@ -281,7 +306,7 @@ export default {
 
     try {
       locks.add(from);
-      cleanupTmp(); // limpia basura vieja
+      cleanupTmp();
 
       if (!args?.length) {
         cooldowns.delete(userId);
@@ -303,7 +328,6 @@ export default {
 
       let { videoUrl, title, thumbnail } = meta;
 
-      // mensaje previo
       if (thumbnail) {
         await sock.sendMessage(from, {
           image: { url: thumbnail },
@@ -317,29 +341,24 @@ export default {
         }, quoted);
       }
 
-      // API url directa
       const info = await fetchDirectMediaUrl({ videoUrl, quality });
       title = safeFileName(info.title || title);
 
-      // chequeo tamaño si el server lo da
       const len = await headContentLength(info.directUrl);
       if (len && len > MAX_DOC_BYTES) {
         throw new Error("❌ Ese archivo supera el límite configurado (2GB).");
       }
 
-      // chequeo espacio libre (por si hay fallback a archivo)
       const free = getFreeBytes(TMP_DIR);
       if (free != null && free < MIN_FREE_BYTES) {
-        // Aún intentamos URL (sin disco). Si URL falla, aquí sí paramos para evitar ENOSPC.
         try {
           await trySendByUrl(sock, from, quoted, info.directUrl, title);
           return;
         } catch {
-          throw new Error("❌ Poco espacio libre para procesar el video. Limpia temporales o mueve TMP a /sdcard.");
+          throw new Error("❌ Poco espacio libre para procesar el video.");
         }
       }
 
-      // Intento 1: URL (cero disco)
       try {
         await trySendByUrl(sock, from, quoted, info.directUrl, title);
         return;
@@ -347,7 +366,6 @@ export default {
         console.error("URL send failed, fallback to file:", e?.message || e);
       }
 
-      // Fallback 2: stream a archivo controlado
       outFile = path.join(TMP_DIR, `${Date.now()}-${Math.random().toString(16).slice(2)}.mp4`);
       const size = await downloadToFileWithLimit(info.directUrl, outFile, MAX_DOC_BYTES);
       await sendByFile(sock, from, quoted, outFile, title, size);
@@ -361,10 +379,8 @@ export default {
       });
     } finally {
       locks.delete(from);
-      // limpieza segura
       try { if (outFile && fs.existsSync(outFile)) fs.unlinkSync(outFile); } catch {}
       try { if (outFile && fs.existsSync(`${outFile}.part`)) fs.unlinkSync(`${outFile}.part`); } catch {}
-      // no borro cooldown aquí para evitar spam; si quieres sin cooldown cuando falla, dime.
     }
   },
 };
