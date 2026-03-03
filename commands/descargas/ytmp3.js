@@ -5,7 +5,7 @@ import yts from "yt-search";
 import { exec } from "child_process";
 
 const API_URL = "https://mayapi.ooguy.com/ytdl";
-const API_KEY = "may-5d597e52";
+const API_KEY = "may-a709a21d";
 
 const COOLDOWN_TIME = 10 * 1000;
 const TMP_DIR = path.join(process.cwd(), "tmp");
