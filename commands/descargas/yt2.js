@@ -53,7 +53,6 @@ function getYoutubeId(url) {
   }
 }
 
-// limpieza automática
 function cleanupTmp(maxAgeMs = CLEANUP_MAX_AGE_MS) {
   try {
     const now = Date.now();
@@ -67,10 +66,11 @@ function cleanupTmp(maxAgeMs = CLEANUP_MAX_AGE_MS) {
   } catch {}
 }
 
-// espacio libre
 function getFreeBytes(dir) {
   try {
-    const out = execSync(`df -k "${dir}" | tail -1 | awk '{print $4}'`).toString().trim();
+    const out = execSync(`df -k "${dir}" | tail -1 | awk '{print $4}'`)
+      .toString()
+      .trim();
     const freeKb = Number(out);
     return Number.isFinite(freeKb) ? freeKb * 1024 : null;
   } catch {
@@ -78,11 +78,12 @@ function getFreeBytes(dir) {
   }
 }
 
-// -------- API NEXEVO 360p --------
+// 🔥 NUEVA API NEXEVO (SIEMPRE 360P)
 async function fetchDirectMediaUrl({ videoUrl }) {
   const { data } = await axios.get(API_URL, {
     timeout: 25000,
-    params: { url: videoUrl }, // 360p por defecto
+    params: { url: videoUrl },
+    validateStatus: (s) => s >= 200 && s < 500,
   });
 
   if (!data?.status || !data?.result?.url) {
@@ -104,7 +105,7 @@ async function resolveVideoInfo(queryOrUrl) {
     return {
       videoUrl: first.url,
       title: safeFileName(first.title),
-      thumbnail: first.thumbnail || null
+      thumbnail: first.thumbnail || null,
     };
   }
 
@@ -116,7 +117,7 @@ async function resolveVideoInfo(queryOrUrl) {
         return {
           videoUrl: info.url || queryOrUrl,
           title: safeFileName(info.title),
-          thumbnail: info.thumbnail || null
+          thumbnail: info.thumbnail || null,
         };
     } catch {}
   }
@@ -134,7 +135,6 @@ async function headContentLength(url) {
   }
 }
 
-// enviar por URL primero
 async function trySendByUrl(sock, from, quoted, directUrl, title) {
   try {
     await sock.sendMessage(from, {
@@ -149,14 +149,13 @@ async function trySendByUrl(sock, from, quoted, directUrl, title) {
       document: { url: directUrl },
       mimetype: "video/mp4",
       fileName: `${title}.mp4`,
-      caption: `📄 Enviado como documento\n🎬 ${title}`,
+      caption: `📄 ${title}`,
       ...global.channelInfo,
     }, quoted);
     return "doc-url";
   }
 }
 
-// descarga controlada
 async function downloadToFileWithLimit(directUrl, outPath, maxBytes) {
   const partPath = `${outPath}.part`;
   let downloaded = 0;
@@ -168,18 +167,20 @@ async function downloadToFileWithLimit(directUrl, outPath, maxBytes) {
 
   const writer = fs.createWriteStream(partPath);
 
-  res.data.on("data", (chunk) => {
-    downloaded += chunk.length;
-    if (downloaded > maxBytes) {
-      res.data.destroy(new Error("Archivo supera el límite"));
-    }
-  });
+  const done = new Promise((resolve, reject) => {
+    res.data.on("data", (chunk) => {
+      downloaded += chunk.length;
+      if (downloaded > maxBytes) {
+        res.data.destroy(new Error("Archivo supera límite"));
+      }
+    });
 
-  await new Promise((resolve, reject) => {
     res.data.pipe(writer);
     writer.on("finish", resolve);
     writer.on("error", reject);
   });
+
+  await done;
 
   const size = fs.statSync(partPath).size;
   if (size < MIN_VALID_BYTES) throw new Error("Archivo inválido");
@@ -196,19 +197,20 @@ async function sendByFile(sock, from, quoted, filePath, title, size) {
       caption: `🎬 ${title}`,
       ...global.channelInfo,
     }, quoted);
-  } else {
-    await sock.sendMessage(from, {
-      document: { url: filePath },
-      mimetype: "video/mp4",
-      fileName: `${title}.mp4`,
-      caption: `📄 Enviado como documento\n🎬 ${title}`,
-      ...global.channelInfo,
-    }, quoted);
+    return;
   }
+
+  await sock.sendMessage(from, {
+    document: { url: filePath },
+    mimetype: "video/mp4",
+    fileName: `${title}.mp4`,
+    caption: `📄 ${title}`,
+    ...global.channelInfo,
+  }, quoted);
 }
 
 export default {
-  command: ["yt2"], // 🔥 SOLO yt2
+  command: ["ytmp4", "yt2"], // 🔥 agregado yt2
   category: "descarga",
 
   run: async (ctx) => {
@@ -216,14 +218,20 @@ export default {
     const msg = ctx.m || ctx.msg || null;
     const userId = from;
 
-    if (locks.has(from))
-      return sock.sendMessage(from, { text: "⏳ Ya estoy procesando otro video aquí." });
+    if (locks.has(from)) {
+      return sock.sendMessage(from, {
+        text: "⏳ Ya estoy procesando otro video aquí.",
+        ...global.channelInfo,
+      });
+    }
 
     const until = cooldowns.get(userId);
-    if (until && until > Date.now())
+    if (until && until > Date.now()) {
       return sock.sendMessage(from, {
         text: `⏳ Espera ${getCooldownRemaining(until)}s`,
+        ...global.channelInfo,
       });
+    }
 
     cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
     const quoted = msg?.key ? { quoted: msg } : undefined;
@@ -234,8 +242,13 @@ export default {
       locks.add(from);
       cleanupTmp();
 
-      if (!args?.length)
-        return sock.sendMessage(from, { text: "❌ Uso: .yt2 <nombre o link>" });
+      if (!args?.length) {
+        cooldowns.delete(userId);
+        return sock.sendMessage(from, {
+          text: "❌ Uso: .yt2 <nombre o link>",
+          ...global.channelInfo,
+        });
+      }
 
       const query = args.join(" ").trim();
       const meta = await resolveVideoInfo(query);
@@ -246,7 +259,8 @@ export default {
       if (thumbnail) {
         await sock.sendMessage(from, {
           image: { url: thumbnail },
-          caption: `⬇️ Procesando...\n\n🎬 ${title}\n🎚️ Calidad: 360p`,
+          caption: `⬇️ Descargando en 360p...\n\n🎬 ${title}`,
+          ...global.channelInfo,
         }, quoted);
       }
 
@@ -255,7 +269,7 @@ export default {
 
       const len = await headContentLength(info.directUrl);
       if (len && len > MAX_DOC_BYTES)
-        throw new Error("❌ Archivo supera 2GB.");
+        throw new Error("Archivo supera el límite de 2GB.");
 
       const free = getFreeBytes(TMP_DIR);
       if (free != null && free < MIN_FREE_BYTES) {
@@ -274,7 +288,10 @@ export default {
 
     } catch (err) {
       cooldowns.delete(userId);
-      await sock.sendMessage(from, { text: `❌ ${err.message}` });
+      await sock.sendMessage(from, {
+        text: `❌ ${err.message}`,
+        ...global.channelInfo,
+      });
     } finally {
       locks.delete(from);
       try { if (outFile && fs.existsSync(outFile)) fs.unlinkSync(outFile); } catch {}
