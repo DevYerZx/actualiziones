@@ -6,10 +6,8 @@ import { exec } from "child_process";
 
 const API_URL = "https://mayapi.ooguy.com/ytdl";
 
-// 🔁 ROTACIÓN DE API KEYS
+// ROTACIÓN API
 const API_KEYS = [
-  //"may-a709a21",
-  //"may-d19c45b2",
   "may-08988cc0",
   "may-ddfb7860",
   "may-ea9fd2d2",
@@ -26,13 +24,20 @@ function getNextApiKey() {
 
 const COOLDOWN_TIME = 10 * 1000;
 const TMP_DIR = path.join(process.cwd(), "tmp");
-const MAX_AUDIO_BYTES = 100 * 1024 * 1024; // 100MB
+
+const MAX_AUDIO_BYTES = 100 * 1024 * 1024;
+const MIN_AUDIO_BYTES = 100000;
+
+const CLEANUP_TIME = 2 * 60 * 60 * 1000;
 
 const cooldowns = new Map();
+const locks = new Set();
 
-if (!fs.existsSync(TMP_DIR)) {
-  fs.mkdirSync(TMP_DIR, { recursive: true });
-}
+const channelInfo = global.channelInfo || {};
+
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
+
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 function safeFileName(name) {
   return String(name || "audio")
@@ -46,171 +51,237 @@ function isHttpUrl(s) {
   return /^https?:\/\//i.test(String(s || ""));
 }
 
-// 🔁 FUNCIÓN MODIFICADA SOLO PARA ROTACIÓN
-async function fetchDirectMediaUrl({ videoUrl }) {
-  let lastError = null;
+// limpiar tmp
+function cleanupTmp() {
+  try {
+    const now = Date.now();
+
+    for (const file of fs.readdirSync(TMP_DIR)) {
+      const p = path.join(TMP_DIR, file);
+      const st = fs.statSync(p);
+
+      if (st.isFile() && now - st.mtimeMs > CLEANUP_TIME) {
+        fs.unlinkSync(p);
+      }
+    }
+  } catch {}
+}
+
+// obtener media desde api
+async function fetchDirectMediaUrl(videoUrl) {
+
+  let lastError;
 
   for (let i = 0; i < API_KEYS.length; i++) {
-    const currentKey = getNextApiKey();
+
+    const key = getNextApiKey();
 
     try {
+
       const { data } = await axios.get(API_URL, {
-        timeout: 20000,
+        timeout: 25000,
         params: {
           url: videoUrl,
           quality: "360p",
-          apikey: currentKey,
+          apikey: key
         },
+        validateStatus: s => s >= 200 && s < 500
       });
 
       if (data?.status && data?.result?.url) {
+
         return {
-          title: data?.result?.title || "audio",
-          directUrl: data.result.url,
+          title: data.result.title || "audio",
+          directUrl: data.result.url
         };
+
       }
 
-      lastError = new Error("API inválida");
+      lastError = new Error("API sin URL");
 
     } catch (err) {
       lastError = err;
     }
+
   }
 
-  throw new Error(lastError?.message || "Todas las API Keys fallaron.");
+  throw new Error(lastError?.message || "Todas las API fallaron");
 }
 
-// Convertir a MP3 con ffmpeg
-async function convertToMp3(inputUrl, outputPath) {
+// convertir mp3
+async function convertToMp3(inputUrl, output) {
+
   return new Promise((resolve, reject) => {
-    exec(
-      `ffmpeg -y -i "${inputUrl}" -vn -ab 128k -ar 44100 -loglevel error "${outputPath}"`,
-      (err) => (err ? reject(err) : resolve())
-    );
+
+    const cmd = `ffmpeg -y -user_agent "Mozilla/5.0" -i "${inputUrl}" -vn -ar 44100 -ac 2 -b:a 128k -loglevel error "${output}"`;
+
+    exec(cmd, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+
   });
+
+}
+
+// buscar video
+async function resolveVideo(query) {
+
+  if (isHttpUrl(query)) {
+
+    const search = await yts(query);
+
+    const first = search?.videos?.[0];
+
+    return {
+      url: query,
+      title: first?.title || "audio",
+      thumbnail: first?.thumbnail || null
+    };
+
+  }
+
+  const search = await yts(query);
+
+  const first = search?.videos?.[0];
+
+  if (!first) return null;
+
+  return {
+    url: first.url,
+    title: first.title,
+    thumbnail: first.thumbnail
+  };
+
 }
 
 export default {
+
   command: ["ytmp3", "play", "yt1"],
   category: "descarga",
 
   run: async (ctx) => {
+
     const { sock, from, args } = ctx;
-    const msg = ctx.m || ctx.msg || null;
+    const msg = ctx.m || ctx.msg;
 
     const userId = from;
-    let finalMp3;
 
-    const until = cooldowns.get(userId);
-    if (until && until > Date.now()) {
-      return sock.sendMessage(from, {
-        text: `⏳ Espera ${Math.ceil((until - Date.now()) / 1000)}s`,
-        ...global.channelInfo,
+    if (locks.has(from)) {
+
+      return sock.sendMessage(from,{
+        text:"⏳ Ya estoy descargando otra música.",
+        ...channelInfo
       });
+
     }
 
-    cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
+    const until = cooldowns.get(userId);
+
+    if (until && until > Date.now()) {
+
+      return sock.sendMessage(from,{
+        text:`⏳ Espera ${Math.ceil((until-Date.now())/1000)}s`,
+        ...channelInfo
+      });
+
+    }
+
+    cooldowns.set(userId,Date.now()+COOLDOWN_TIME);
+
+    let finalMp3;
 
     const quoted = msg?.key ? { quoted: msg } : undefined;
 
     try {
+
+      locks.add(from);
+
+      cleanupTmp();
+
       if (!args?.length) {
+
         cooldowns.delete(userId);
-        return sock.sendMessage(from, {
-          text: "❌ Uso: .play <nombre o link>\n❌ Uso: .ytmp3 <nombre o link>",
-          ...global.channelInfo,
+
+        return sock.sendMessage(from,{
+          text:"❌ Uso: .play <nombre o link>\n❌ Uso: .ytmp3 <nombre o link>",
+          ...channelInfo
         });
+
       }
 
       const query = args.join(" ").trim();
-      let videoUrl = query;
-      let title = "audio";
-      let thumbnail = null;
 
-      finalMp3 = path.join(TMP_DIR, `${Date.now()}.mp3`);
+      const meta = await resolveVideo(query);
 
-      // Si no es link, buscar en YouTube
-      if (!isHttpUrl(query)) {
-        const search = await yts(query);
-        const first = search?.videos?.[0];
+      if (!meta) {
 
-        if (!first) {
-          cooldowns.delete(userId);
-          return sock.sendMessage(from, {
-            text: "❌ No se encontró.",
-            ...global.channelInfo,
-          });
-        }
+        cooldowns.delete(userId);
 
-        videoUrl = first.url;
-        title = safeFileName(first.title);
-        thumbnail = first.thumbnail;
+        return sock.sendMessage(from,{
+          text:"❌ No se encontró la música.",
+          ...channelInfo
+        });
+
       }
 
-      // Obtener info desde API
-      const info = await fetchDirectMediaUrl({ videoUrl });
-      title = safeFileName(info.title);
+      let { url, title, thumbnail } = meta;
 
-      // Si no hay thumbnail, intentar obtenerla
-      if (!thumbnail) {
-        const search = await yts(videoUrl);
-        const first = search?.videos?.[0];
-        if (first) thumbnail = first.thumbnail;
-      }
+      title = safeFileName(title);
 
-      // Mensaje previo
-      await sock.sendMessage(
-        from,
-        {
-          image: thumbnail ? { url: thumbnail } : undefined,
-          caption: `🎵 Descargando música...\n\n🎧 ${title}`,
-          ...global.channelInfo,
-        },
-        quoted
-      );
+      await sock.sendMessage(from,{
+        image: thumbnail ? { url: thumbnail } : undefined,
+        caption:`🎵 Descargando música...\n\n🎧 ${title}`,
+        ...channelInfo
+      },quoted);
 
-      // Convertir a mp3
-      await convertToMp3(info.directUrl, finalMp3);
+      const info = await fetchDirectMediaUrl(url);
+
+      finalMp3 = path.join(TMP_DIR,`${Date.now()}-${Math.random().toString(16).slice(2)}.mp3`);
+
+      await convertToMp3(info.directUrl,finalMp3);
 
       const size = fs.existsSync(finalMp3)
         ? fs.statSync(finalMp3).size
         : 0;
 
-      if (!size || size < 100000) {
+      if (!size || size < MIN_AUDIO_BYTES)
         throw new Error("Audio inválido");
-      }
 
-      if (size > MAX_AUDIO_BYTES) {
+      if (size > MAX_AUDIO_BYTES)
         throw new Error("Audio demasiado grande");
-      }
 
-      // Enviar como audio real
-      await sock.sendMessage(
-        from,
-        {
-          audio: { url: finalMp3 },
-          mimetype: "audio/mpeg",
-          ptt: false,
-          fileName: `${title}.mp3`,
-          ...global.channelInfo,
-        },
-        quoted
-      );
+      await sock.sendMessage(from,{
+        audio:{ url: finalMp3 },
+        mimetype:"audio/mpeg",
+        fileName:`${title}.mp3`,
+        ptt:false,
+        ...channelInfo
+      },quoted);
 
-    } catch (err) {
-      console.error("YTMP3 ERROR:", err?.message || err);
+    } catch(err){
+
+      console.error("YTMP3 ERROR:",err?.message || err);
+
       cooldowns.delete(userId);
 
-      await sock.sendMessage(from, {
-        text: "❌ Error al procesar la música.",
-        ...global.channelInfo,
+      await sock.sendMessage(from,{
+        text:"❌ Error al descargar la música.",
+        ...channelInfo
       });
+
     } finally {
-      try {
-        if (finalMp3 && fs.existsSync(finalMp3)) {
+
+      locks.delete(from);
+
+      try{
+        if(finalMp3 && fs.existsSync(finalMp3)){
           fs.unlinkSync(finalMp3);
         }
-      } catch {}
+      }catch{}
+
     }
-  },
+
+  }
+
 };
