@@ -82,7 +82,7 @@ async function fetchDirectMediaUrl(videoUrl) {
         timeout: 25000,
         params: {
           url: videoUrl,
-          quality: "360p",
+          quality: "128",
           apikey: key
         },
         validateStatus: s => s >= 200 && s < 500
@@ -113,7 +113,7 @@ async function convertToMp3(inputUrl, output) {
 
   return new Promise((resolve, reject) => {
 
-    const cmd = `ffmpeg -y -user_agent "Mozilla/5.0" -i "${inputUrl}" -vn -ar 44100 -ac 2 -b:a 128k -loglevel error "${output}"`;
+    const cmd = `ffmpeg -y -headers "User-Agent: Mozilla/5.0\\r\\nReferer: https://www.youtube.com/\\r\\nOrigin: https://www.youtube.com\\r\\n" -i "${inputUrl}" -vn -ar 44100 -ac 2 -b:a 128k -loglevel error "${output}"`;
 
     exec(cmd, (err) => {
       if (err) reject(err);
@@ -133,6 +133,10 @@ async function resolveVideo(query) {
 
     const first = search?.videos?.[0];
 
+    if (first?.seconds > 1800) {
+      throw new Error("Video demasiado largo (máx 30 min)");
+    }
+
     return {
       url: query,
       title: first?.title || "audio",
@@ -146,6 +150,10 @@ async function resolveVideo(query) {
   const first = search?.videos?.[0];
 
   if (!first) return null;
+
+  if (first.seconds > 1800) {
+    throw new Error("Video demasiado largo (máx 30 min)");
+  }
 
   return {
     url: first.url,
