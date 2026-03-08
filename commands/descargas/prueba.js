@@ -3,92 +3,77 @@ import yts from "yt-search"
 
 export default {
 
-command: ["yt2"],
+command:["yt2"],
 
-async run({ sock, msg, from, args }) {
+async run({ sock, from, args }){
 
-try {
+try{
 
-if(!args || args.length === 0){
+if(!args.length){
 return sock.sendMessage(from,{
-text:"❌ Escribe algo\nEjemplo:\n.yt2 bad bunny"
+text:"❌ Ejemplo:\n.yt2 bad bunny"
 })
 }
 
 const query = args.join(" ")
 
-await sock.sendMessage(from,{ text:"🔎 Buscando..." })
+await sock.sendMessage(from,{text:"🔎 Buscando..."})
 
 const search = await yts(query)
 const video = search.videos[0]
 
 if(!video){
-return sock.sendMessage(from,{ text:"❌ No encontrado" })
+return sock.sendMessage(from,{text:"❌ No encontrado"})
 }
 
-const url = video.url
+const yt = video.url
 
-await sock.sendMessage(from,{ text:"⚡ Probando APIs..." })
+await sock.sendMessage(from,{text:"⏳ Enviando a Loader..."})
 
-const apis = [
+const convert = await axios.get(
+`https://loader.to/ajax/download.php?format=mp4&url=${encodeURIComponent(yt)}`
+)
 
-`https://cdn.savetube.me/info?url=${url}`,
-`https://api.vevioz.com/api/button/mp4/${url}`,
-`https://loader.to/ajax/download.php?url=${url}&format=mp4`,
-`https://api.yt1s.com/api/ajaxSearch/index?q=${url}&vt=home`,
-`https://yt5s.io/api/ajaxSearch`,
-`https://keepvid.pro/api`,
-`https://y2mate.guru/api/convert`
+const id = convert.data.id
 
-]
+if(!id){
+return sock.sendMessage(from,{text:"❌ Error iniciando descarga"})
+}
 
-let download = null
+let link = null
 
-for(const api of apis){
+for(let i=0;i<15;i++){
 
-try{
+await new Promise(r=>setTimeout(r,2000))
 
-let res = await axios.get(api,{timeout:10000})
+const progress = await axios.get(
+`https://loader.to/ajax/progress.php?id=${id}`
+)
 
-if(!res.data) continue
+if(progress.data.download_url){
 
-let link =
-res.data.url ||
-res.data.download ||
-res.data.result ||
-res.data.link ||
-res.data.video
-
-if(typeof link === "string" && link.startsWith("http")){
-download = link
-console.log("API FUNCIONANDO:",api)
+link = progress.data.download_url
 break
-}
 
-}catch(e){
-console.log("API FALLÓ:",api)
-continue
 }
 
 }
 
-if(!download){
-return sock.sendMessage(from,{
-text:"❌ Ninguna API devolvió video"
-})
+if(!link){
+return sock.sendMessage(from,{text:"❌ No se pudo obtener el video"})
 }
 
 await sock.sendMessage(from,{
-video:{ url: download },
+video:{url:link},
 caption:`🎬 ${video.title}`
 })
 
 }catch(e){
 
-console.error("ERROR yt2:",e)
+console.error("YT2 ERROR:",e)
 
 sock.sendMessage(from,{
-text:"❌ Error en descarga"
+text:"❌ Error descargando"
 })
 
 }
