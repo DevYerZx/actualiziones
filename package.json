@@ -14,7 +14,7 @@
     "pino": "^9.13.1",
     "yt-search": "^2.10.4",
     "axios": "^1.6.0",
-    "yt-dlp-exec": "latest"
+    "play-dl": "^1.9.7"
   },
   "overrides": {
     "minimatch": "^10.2.1"
