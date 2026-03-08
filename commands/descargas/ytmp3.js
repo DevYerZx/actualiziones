@@ -1,4 +1,3 @@
-
 import axios from "axios"
 import yts from "yt-search"
 
@@ -34,7 +33,6 @@ try{
 const query = args.join(" ")
 
 const search = await yts(query)
-
 const video = search.videos[0]
 
 if(!video){
@@ -60,33 +58,32 @@ throw new Error("API sin audio")
 
 const audioUrl = data.download
 
-// descargar audio con headers
+// descargar audio
 const audioRes = await axios({
 method:"GET",
 url:audioUrl,
 responseType:"arraybuffer",
 headers:{
 "User-Agent":"Mozilla/5.0",
-"Accept":"*/*",
-"Connection":"keep-alive"
+"Referer":"https://www.youtube.com/"
 },
 timeout:30000
 })
 
-if(!audioRes.data){
+if(!audioRes.data || audioRes.data.length === 0){
 throw new Error("Audio vacío")
 }
 
 await sock.sendMessage(from,{
 audio: Buffer.from(audioRes.data),
-mimetype:"audio/mpeg",
-fileName: safeFileName(video.title)+".mp3",
+mimetype:"audio/ogg; codecs=opus",
+fileName: safeFileName(video.title)+".ogg",
 ...channelInfo
 },{quoted:msg})
 
 }catch(err){
 
-console.log("[LOG] PLAY ERROR:", err?.response?.data || err.message)
+console.log("[PLAY ERROR]", err?.response?.data || err.message)
 
 await sock.sendMessage(from,{
 text:"❌ Error descargando música",
@@ -98,4 +95,3 @@ text:"❌ Error descargando música",
 }
 
 }
-
