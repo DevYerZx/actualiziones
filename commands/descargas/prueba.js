@@ -1,38 +1,23 @@
 import axios from "axios"
 import yts from "yt-search"
+import fs from "fs"
+import { exec } from "child_process"
+import { promisify } from "util"
+
+const execAsync = promisify(exec)
 
 const API_BASE = "https://dvyer-api.onrender.com"
 const channelInfo = global.channelInfo || {}
 
 const AUDIO_QUALITY = "128k"
-const TIMEOUT_MS = 90000
+const TMP_AUDIO = "./tmp_audio.m4a"
+const TMP_THUMB = "./tmp_thumb.jpg"
+const TMP_FINAL = "./tmp_final.mp3"
 
 function safeFileName(name){
   return String(name || "audio")
     .replace(/[\\/:*?"<>|]/g,"")
     .slice(0,80)
-}
-
-const sleep = (ms)=> new Promise(r=>setTimeout(r,ms))
-
-async function getYtdlAudio(url){
-  for(let i=0;i<2;i++){
-    try{
-      const {data} = await axios.get(`${API_BASE}/ytdl`,{
-        params:{
-          type:"audio",
-          url,
-          quality:AUDIO_QUALITY,
-          safe:true
-        },
-        timeout:TIMEOUT_MS
-      })
-      return data
-    }catch(e){
-      if(i===1) throw e
-      await sleep(2500)
-    }
-  }
 }
 
 export default {
@@ -66,57 +51,72 @@ export default {
 
       await sock.sendMessage(from,{
         image:{url:video.thumbnail},
-        caption:`🎵 *${video.title}*\n⏱️ ${video.timestamp}\n\n⬇️ Descargando audio...`,
+        caption:`🎵 *${video.title}*\n⏱️ ${video.timestamp}\n\n⬇️ Procesando audio...`,
         ...channelInfo
       },{quoted:msg})
 
-      const data = await getYtdlAudio(video.url)
-
-      if(!data?.status || !data?.result){
-        throw new Error("API no devolvió datos")
-      }
+      // pedir audio a API
+      const {data} = await axios.get(`${API_BASE}/ytdl`,{
+        params:{
+          type:"audio",
+          url:video.url,
+          quality:AUDIO_QUALITY
+        }
+      })
 
       const audioUrl =
         data.result.url ||
         data.result.download_url_full ||
         data.result.direct_url
 
-      if(!audioUrl){
-        throw new Error("API no devolvió audio")
-      }
-
-      const fileName = safeFileName(video.title)+".m4a"
+      if(!audioUrl) throw new Error("No audio url")
 
       // descargar audio
       const audioBuffer = (await axios.get(audioUrl,{
-        responseType:"arraybuffer",
-        timeout:TIMEOUT_MS
+        responseType:"arraybuffer"
       })).data
 
-      // 🎧 enviar audio con metadata
+      fs.writeFileSync(TMP_AUDIO,audioBuffer)
+
+      // descargar portada
+      const thumbBuffer = (await axios.get(video.thumbnail,{
+        responseType:"arraybuffer"
+      })).data
+
+      fs.writeFileSync(TMP_THUMB,thumbBuffer)
+
+      // 🎧 convertir con FFmpeg + metadata
+      await execAsync(`
+      ffmpeg -y -i ${TMP_AUDIO} -i ${TMP_THUMB} \
+      -map 0:a -map 1:v \
+      -c:a libmp3lame -b:a 192k \
+      -metadata title="${video.title}" \
+      -metadata artist="YouTube" \
+      -id3v2_version 3 \
+      ${TMP_FINAL}
+      `)
+
+      const finalBuffer = fs.readFileSync(TMP_FINAL)
+
+      // enviar audio
       await sock.sendMessage(from,{
-        audio:audioBuffer,
+        audio:finalBuffer,
         mimetype:"audio/mpeg",
-        fileName,
-        ptt:false,
-        contextInfo:{
-          externalAdReply:{
-            title: video.title,
-            body: "YouTube Music",
-            thumbnailUrl: video.thumbnail,
-            mediaType:1,
-            renderLargerThumbnail:true
-          }
-        },
+        fileName:safeFileName(video.title)+".mp3",
         ...channelInfo
       },{quoted:msg})
+
+      // limpiar archivos
+      fs.unlinkSync(TMP_AUDIO)
+      fs.unlinkSync(TMP_THUMB)
+      fs.unlinkSync(TMP_FINAL)
 
     }catch(err){
 
       console.log("[PLAY2 ERROR]",err)
 
       await sock.sendMessage(from,{
-        text:"❌ Error descargando música\nIntenta otra canción",
+        text:"❌ Error descargando música",
         ...channelInfo
       },{quoted:msg})
 
