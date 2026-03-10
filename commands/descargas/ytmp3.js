@@ -1,11 +1,14 @@
 import axios from "axios";
 import yts from "yt-search";
-import { spawn } from "child_process";
+import fs from "fs";
 import path from "path";
+import { exec } from "child_process";
 
 const API_BASE = "https://dv-yer-api.online/ytmp3";
-const COOLDOWN = 8000;
-const cooldowns = new Map();
+const TMP_DIR = path.join(process.cwd(), "tmp");
+
+// Asegurar que la carpeta temporal exista
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR);
 
 export default {
   command: ["ytmp3", "play"],
@@ -15,14 +18,13 @@ export default {
     const { sock, from, args } = ctx;
     const msg = ctx.m || ctx.msg || null;
     const messageKey = msg?.key || null;
-
-    const now = Date.now();
-    if (cooldowns.has(from) && now < cooldowns.get(from)) return;
-    cooldowns.set(from, now + COOLDOWN);
+    
+    // Generar nombre de archivo único para evitar conflictos
+    const fileName = `audio_${Date.now()}.mp3`;
+    const outputPath = path.join(TMP_DIR, fileName);
 
     try {
       if (!args?.length) return;
-
       if (messageKey) await sock.sendMessage(from, { react: { text: "⏳", key: messageKey } });
 
       let query = args.join(" ").trim();
@@ -38,50 +40,34 @@ export default {
       });
       
       const streamUrl = apiRes.data?.download_url_full;
-      if (!streamUrl) throw new Error("No se pudo obtener el stream.");
+      if (!streamUrl) throw new Error("API no respondió.");
 
-      // 2. Procesar con FFMPEG para streaming
-      // Esto convierte el stream entrante directamente a un formato amigable para WhatsApp
-      const ffmpegProcess = spawn("ffmpeg", [
-        "-i", streamUrl,
-        "-vn",
-        "-acodec", "libmp3lame",
-        "-q:a", "2",
-        "-f", "mp3",
-        "pipe:1"
-      ]);
-
-      const chunks = [];
-      ffmpegProcess.stdout.on("data", (chunk) => chunks.push(chunk));
-      
+      // 2. Descargar y convertir usando ffmpeg directamente al archivo local
       await new Promise((resolve, reject) => {
-        ffmpegProcess.on("close", resolve);
-        ffmpegProcess.on("error", reject);
+        // Comando ffmpeg que descarga de la URL y guarda en el archivo temporal
+        const cmd = `ffmpeg -i "${streamUrl}" -vn -acodec libmp3lame -q:a 2 "${outputPath}"`;
+        exec(cmd, (error) => {
+          if (error) reject(error);
+          else resolve();
+        });
       });
 
-      const buffer = Buffer.concat(chunks);
-
-      // 3. Enviar como Nota de Voz (streaming)
+      // 3. Enviar el archivo físico desde el servidor a WhatsApp
       await sock.sendMessage(from, {
-        audio: buffer,
+        audio: { url: outputPath },
         mimetype: "audio/mpeg",
-        ptt: true, // Esto hace que aparezca como nota de voz
-        contextInfo: {
-          externalAdReply: {
-            title: "Audio Streaming",
-            body: "Procesado con FFMPEG",
-            mediaType: 1,
-            renderLargerThumbnail: true
-          }
-        },
-        ...global.channelInfo
+        ptt: true, // Nota de voz
+        fileName: "audio.mp3"
       }, { quoted: msg });
 
       if (messageKey) await sock.sendMessage(from, { react: { text: "✅", key: messageKey } });
 
     } catch (err) {
-      console.error("❌ ERROR FFMPEG:", err);
+      console.error("❌ ERROR:", err);
       if (messageKey) await sock.sendMessage(from, { react: { text: "❌", key: messageKey } });
+    } finally {
+      // 4. Limpiar archivo temporal
+      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
     }
   },
 };
