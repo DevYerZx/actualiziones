@@ -30,16 +30,24 @@ function getCooldownRemaining(untilMs) {
 function getYoutubeId(url) {
   try {
     const u = new URL(url);
-    if (u.hostname.includes("youtu.be")) return u.pathname.replace("/", "").trim();
+
+    if (u.hostname.includes("youtu.be")) {
+      return u.pathname.replace("/", "").trim();
+    }
+
     const v = u.searchParams.get("v");
     if (v) return v.trim();
 
     const parts = u.pathname.split("/").filter(Boolean);
-    const idxShorts = parts.indexOf("shorts");
-    if (idxShorts >= 0 && parts[idxShorts + 1]) return parts[idxShorts + 1].trim();
+    const shortsIndex = parts.indexOf("shorts");
+    if (shortsIndex >= 0 && parts[shortsIndex + 1]) {
+      return parts[shortsIndex + 1].trim();
+    }
 
-    const idxEmbed = parts.indexOf("embed");
-    if (idxEmbed >= 0 && parts[idxEmbed + 1]) return parts[idxEmbed + 1].trim();
+    const embedIndex = parts.indexOf("embed");
+    if (embedIndex >= 0 && parts[embedIndex + 1]) {
+      return parts[embedIndex + 1].trim();
+    }
 
     return null;
   } catch {
@@ -57,6 +65,15 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function extractApiError(data, status) {
+  return (
+    data?.detail ||
+    data?.error?.message ||
+    data?.message ||
+    (status ? `HTTP ${status}` : "Error de API")
+  );
+}
+
 function pickBestDownloadUrl(data) {
   return (
     data?.download_url_full ||
@@ -66,19 +83,6 @@ function pickBestDownloadUrl(data) {
     data?.result?.download_url ||
     data?.result?.url ||
     ""
-  );
-}
-
-function pickTitle(data, fallback = "video") {
-  return data?.title || data?.result?.title || fallback;
-}
-
-function extractApiError(data, status) {
-  return (
-    data?.detail ||
-    data?.error?.message ||
-    data?.message ||
-    (status ? `HTTP ${status}` : "Error de API")
   );
 }
 
@@ -165,7 +169,7 @@ async function requestVideoLink(videoUrl) {
       }
 
       return {
-        title: pickTitle(data, "video"),
+        title: safeFileName(data?.title || data?.result?.title || "video"),
         directUrl,
       };
     } catch (error) {
