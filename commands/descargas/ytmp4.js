@@ -58,37 +58,82 @@ function toAbsoluteUrl(urlLike) {
   return new URL(urlLike, API_BASE).href;
 }
 
-// ===== API (URL directa) =====
-async function fetchDirectMediaUrl({ videoUrl, quality }) {
-  const { data } = await axios.get(API_URL, {
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+function pickUrl(data) {
+  return (
+    data?.result?.download_url_full ||
+    data?.result?.download_url ||
+    data?.result?.url ||
+    data?.url ||
+    ""
+  );
+}
+
+async function requestVideoLink(url, quality, mode = "ytdl") {
+  if (mode === "ytmp4link") {
+    return axios.get(`${API_BASE}/ytmp4/link`, {
+      timeout: 30000,
+      params: { url, quality },
+      validateStatus: (s) => s >= 200 && s < 500,
+    });
+  }
+
+  return axios.get(API_URL, {
     timeout: 30000,
     params: {
       type: "video",
-      url: videoUrl,
+      url,
       quality,
       safe: true,
     },
     validateStatus: (s) => s >= 200 && s < 500,
   });
+}
 
-  if (!data?.status) {
-    throw new Error(data?.error?.message || data?.message || "API inválida o sin URL directa.");
+// ===== API (URL directa con reintentos + fallback) =====
+async function fetchDirectMediaUrl({ videoUrl, quality }) {
+  const qualities = [quality, "360p", "480p", "240p", "144p", "best"]
+    .filter(Boolean)
+    .map((q) => String(q).toLowerCase())
+    .filter((q, i, arr) => arr.indexOf(q) === i);
+
+  const strategies = ["ytdl", "ytmp4link"];
+  let lastError = "No se pudo obtener URL directa.";
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    for (const q of qualities) {
+      for (const mode of strategies) {
+        try {
+          const { data } = await requestVideoLink(videoUrl, q, mode);
+
+          if (data?.status === false) {
+            lastError = data?.error?.message || data?.message || "status false";
+            continue;
+          }
+
+          const candidate = pickUrl(data);
+          if (!candidate) {
+            lastError = "Respuesta sin URL de descarga.";
+            continue;
+          }
+
+          return {
+            title: data?.result?.title || data?.title || "video",
+            directUrl: toAbsoluteUrl(candidate),
+          };
+        } catch (e) {
+          lastError = e?.message || "request failed";
+        }
+      }
+    }
+
+    await sleep(900 * attempt);
   }
 
-  const candidateUrl =
-    data?.result?.download_url_full ||
-    data?.result?.download_url ||
-    data?.result?.url ||
-    data?.url;
-
-  if (!candidateUrl) {
-    throw new Error("API inválida o sin URL directa.");
-  }
-
-  return {
-    title: data?.result?.title || "video",
-    directUrl: toAbsoluteUrl(candidateUrl),
-  };
+  throw new Error(lastError);
 }
 
 async function resolveVideoInfo(queryOrUrl) {
