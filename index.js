@@ -1,6 +1,5 @@
-
 // =========================
-// DVYER BOT - INDEX (STABLE)
+// DVYER BOT - INDEX (PAIRING STABLE)
 // =========================
 
 import * as baileys from "@whiskeysockets/baileys";
@@ -28,13 +27,13 @@ const {
   makeInMemoryStore,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers,
 } = baileys;
 
 // ================= CONFIG =================
 
 const CARPETA_AUTH = "dvyer-session";
 const logger = pino({ level: "silent" });
+const FIXED_BROWSER = ["Windows", "Chrome", "114.0.5735.198"];
 
 const settings = JSON.parse(
   fs.readFileSync("./settings/settings.json", "utf-8")
@@ -59,7 +58,7 @@ global.channelInfo = settings?.newsletter?.enabled
     }
   : {};
 
-// ================= TMP DIR =================
+// ================= TMP / STORE =================
 
 const TMP_DIR = path.join(process.cwd(), "tmp");
 const STORE_FILE = path.join(TMP_DIR, "baileys_store.json");
@@ -78,7 +77,8 @@ process.env.TEMP = TMP_DIR;
 
 let sockGlobal = null;
 let conectando = false;
-let pairingSolicitado = false;
+let pairingRequested = false;
+let reconnectTimer = null;
 
 const rl = readline.createInterface({
   input: process.stdin,
@@ -86,7 +86,6 @@ const rl = readline.createInterface({
 });
 
 const preguntar = (q) => new Promise((r) => rl.question(q, r));
-
 const comandos = new Map();
 const groupCache = new Map();
 
@@ -98,8 +97,6 @@ const mensajesPorTipo = {
   Privado: 0,
   Desconocido: 0,
 };
-
-// ================= STORE =================
 
 const store =
   typeof makeInMemoryStore === "function"
@@ -159,8 +156,8 @@ function shouldIgnoreError(value) {
 }
 
 const log = console.log;
-const error = console.error;
 const warn = console.warn;
+const error = console.error;
 
 console.log = (...a) => {
   pushConsole("LOG", a);
@@ -192,20 +189,53 @@ process.on("uncaughtException", (err) => {
 
 // ================= UTIL =================
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function tipoChat(jid = "") {
   if (jid.endsWith("@g.us")) return "Grupo";
   if (jid.endsWith("@s.whatsapp.net")) return "Privado";
   return "Desconocido";
 }
 
-function obtenerTexto(message) {
-  if (!message) return "";
+function shouldIgnoreJid(jid = "") {
+  return (
+    !jid ||
+    jid === "status@broadcast" ||
+    jid.endsWith("@broadcast") ||
+    jid.endsWith("@newsletter")
+  );
+}
 
-  const msg =
-    message?.ephemeralMessage?.message ||
-    message?.viewOnceMessage?.message ||
-    message?.viewOnceMessageV2?.message ||
-    message;
+function normalizeMessageContent(message = {}) {
+  let content = message;
+
+  while (true) {
+    if (content?.ephemeralMessage?.message) {
+      content = content.ephemeralMessage.message;
+      continue;
+    }
+    if (content?.viewOnceMessage?.message) {
+      content = content.viewOnceMessage.message;
+      continue;
+    }
+    if (content?.viewOnceMessageV2?.message) {
+      content = content.viewOnceMessageV2.message;
+      continue;
+    }
+    if (content?.viewOnceMessageV2Extension?.message) {
+      content = content.viewOnceMessageV2Extension.message;
+      continue;
+    }
+    break;
+  }
+
+  return content || {};
+}
+
+function obtenerTexto(message) {
+  const msg = normalizeMessageContent(message);
 
   return (
     msg?.conversation ||
@@ -222,43 +252,56 @@ function obtenerTexto(message) {
   );
 }
 
-function getQuoted(msg) {
-  const contextInfo =
-    msg?.message?.extendedTextMessage?.contextInfo ||
-    msg?.message?.imageMessage?.contextInfo ||
-    msg?.message?.videoMessage?.contextInfo ||
-    msg?.message?.documentMessage?.contextInfo ||
-    {};
+function getContextInfo(message = {}) {
+  const msg = normalizeMessageContent(message);
+  const type = Object.keys(msg || {})[0];
+  if (!type) return {};
+  return msg?.[type]?.contextInfo || {};
+}
 
-  if (!contextInfo?.quotedMessage) return null;
+function serializeMessage(raw) {
+  const message = normalizeMessageContent(raw?.message || {});
+  const text = String(obtenerTexto(message) || "").trim();
+  const contextInfo = getContextInfo(raw?.message || {});
+  const from = raw?.key?.remoteJid || "";
+  const sender =
+    raw?.key?.participant ||
+    contextInfo?.participant ||
+    raw?.key?.remoteJid ||
+    "";
+
+  let quoted = null;
+
+  if (contextInfo?.quotedMessage) {
+    const quotedText = obtenerTexto(contextInfo.quotedMessage);
+    quoted = {
+      key: {
+        remoteJid: from,
+        fromMe: false,
+        id: contextInfo?.stanzaId || "",
+        participant: contextInfo?.participant || sender,
+      },
+      message: contextInfo.quotedMessage,
+      text: quotedText,
+      body: quotedText,
+    };
+  }
 
   return {
-    key: {
-      remoteJid: msg.key.remoteJid,
-      fromMe: false,
-      id: contextInfo.stanzaId || "",
-      participant: contextInfo.participant || msg.key.participant || msg.key.remoteJid,
-    },
-    message: contextInfo.quotedMessage,
+    ...raw,
+    message,
+    text,
+    body: text,
+    from,
+    sender,
+    chat: from,
+    isGroup: from.endsWith("@g.us"),
+    quoted,
   };
 }
 
-function serializarMensaje(msg) {
-  const text = obtenerTexto(msg.message);
-  const quotedRaw = getQuoted(msg);
-
-  return {
-    ...msg,
-    text,
-    body: text,
-    quoted: quotedRaw
-      ? {
-          ...quotedRaw,
-          text: obtenerTexto(quotedRaw.message),
-          body: obtenerTexto(quotedRaw.message),
-        }
-      : null,
-  };
+function sanitizePhoneNumber(value) {
+  return String(value || "").replace(/\D/g, "");
 }
 
 async function getVersionSafe() {
@@ -272,6 +315,14 @@ async function getVersionSafe() {
 
 async function cachedGroupMetadata(jid) {
   return groupCache.get(jid) || undefined;
+}
+
+function scheduleReconnect(ms = 2500) {
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    iniciarBot();
+  }, ms);
 }
 
 // ================= BANNER =================
@@ -338,12 +389,63 @@ async function cargarComandos() {
 
         console.log("✓ Comando cargado:", nombres.join(", "));
       } catch (e) {
-        console.error("Error cargando comando", e);
+        console.error("Error cargando comando:", ruta, e);
       }
     }
   }
 
   await leer(base);
+}
+
+// ================= PAIRING =================
+
+async function requestPairingCodeSafe(sock) {
+  if (pairingRequested || sock.authState?.creds?.registered) return;
+
+  pairingRequested = true;
+
+  try {
+    const configuredNumber =
+      sanitizePhoneNumber(settings?.pairingNumber) ||
+      sanitizePhoneNumber(settings?.ownerNumber) ||
+      "";
+
+    let numero = configuredNumber;
+
+    if (!numero) {
+      console.log("📲 Bot no vinculado");
+      numero = sanitizePhoneNumber(
+        await preguntar("Numero con codigo de pais, sin + ni espacios: ")
+      );
+    }
+
+    if (!numero) {
+      pairingRequested = false;
+      console.log("Numero invalido");
+      return;
+    }
+
+    console.log("Esperando 5 segundos para pedir el pairing code...");
+    await delay(5000);
+
+    const code = await sock.requestPairingCode(numero);
+
+    console.log("\nCODIGO DE VINCULACION:\n");
+    console.log(chalk.greenBright(code));
+    console.log(
+      chalk.yellow(
+        "WhatsApp > Dispositivos vinculados > Vincular con numero de telefono"
+      )
+    );
+    console.log(
+      chalk.gray(
+        "Si WhatsApp lo marca invalido, espera 30-40 minutos y vuelve a intentar solo una vez."
+      )
+    );
+  } catch (e) {
+    pairingRequested = false;
+    console.error("Error solicitando pairing code:", e);
+  }
 }
 
 // ================= BOT =================
@@ -358,14 +460,15 @@ async function iniciarBot() {
     const { state, saveCreds } = await useMultiFileAuthState(CARPETA_AUTH);
     const version = await getVersionSafe();
 
-    pairingSolicitado = false;
-
-    sockGlobal = makeWASocket({
+    const sock = makeWASocket({
       version,
       logger,
       printQRInTerminal: false,
       markOnlineOnConnect: false,
-      browser: Browsers?.ubuntu ? Browsers.ubuntu("DVYER BOT") : undefined,
+      browser: FIXED_BROWSER,
+      defaultQueryTimeoutMs: undefined,
+      connectTimeoutMs: 60000,
+      keepAliveIntervalMs: 30000,
       auth: {
         creds: state.creds,
         keys: makeCacheableSignalKeyStore(state.keys, logger),
@@ -382,7 +485,7 @@ async function iniciarBot() {
       cachedGroupMetadata,
     });
 
-    const sock = sockGlobal;
+    sockGlobal = sock;
 
     if (store?.bind) {
       store.bind(sock.ev);
@@ -410,68 +513,56 @@ async function iniciarBot() {
 
     sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
       try {
-        if (qr && !sock.authState.creds.registered && !pairingSolicitado) {
-          pairingSolicitado = true;
+        if (qr && !sock.authState?.creds?.registered && !pairingRequested) {
+          await requestPairingCodeSafe(sock);
+        }
 
-          console.log("📲 Bot no vinculado");
-          let numero = await preguntar("Numero con codigo de pais: ");
-          numero = String(numero || "").replace(/\D/g, "");
-
-          if (!numero) {
-            console.log("Numero invalido");
-            pairingSolicitado = false;
-            return;
-          }
-
-          const codigo = await sock.requestPairingCode(numero);
-
-          console.log("\nCODIGO DE VINCULACION:\n");
-          console.log(chalk.greenBright(codigo));
-          console.log(
-            chalk.yellow(
-              "Abre WhatsApp > Dispositivos vinculados > Vincular con numero de telefono"
-            )
-          );
+        if (connection === "connecting") {
+          console.log("Conectando...");
         }
 
         if (connection === "open") {
+          pairingRequested = false;
           console.log(chalk.green("✅ DVYER BOT CONECTADO"));
         }
 
         if (connection === "close") {
-          const code = lastDisconnect?.error?.output?.statusCode;
+          const code =
+            lastDisconnect?.error?.output?.statusCode ||
+            lastDisconnect?.error?.data?.statusCode ||
+            0;
 
           console.log("Conexion cerrada:", code);
 
-          if (code === 401 || code === DisconnectReason.loggedOut) {
+          const loggedOut =
+            code === 401 || code === DisconnectReason.loggedOut;
+
+          if (loggedOut) {
             try {
               fs.rmSync(CARPETA_AUTH, { recursive: true, force: true });
             } catch {}
           }
 
-          setTimeout(() => {
-            iniciarBot();
-          }, 2000);
+          pairingRequested = false;
+          scheduleReconnect(loggedOut ? 4000 : 2500);
         }
       } catch (e) {
-        pairingSolicitado = false;
+        pairingRequested = false;
         console.error("Error en connection.update:", e);
       }
     });
 
-    // ================= MENSAJES =================
-
     sock.ev.on("messages.upsert", async ({ messages }) => {
       for (const raw of messages || []) {
         try {
-          if (!raw?.message || raw.key.fromMe) continue;
+          if (!raw?.message) continue;
+          if (raw?.key?.fromMe) continue;
 
-          const from = raw.key.remoteJid || "";
-          if (!from || from === "status@broadcast") continue;
+          const from = raw?.key?.remoteJid || "";
+          if (shouldIgnoreJid(from)) continue;
 
-          const msg = serializarMensaje(raw);
-          const texto = msg.text;
-
+          const m = serializeMessage(raw);
+          const texto = String(m?.text || "").trim();
           if (!texto) continue;
 
           totalMensajes++;
@@ -479,16 +570,14 @@ async function iniciarBot() {
           const tipo = tipoChat(from);
           mensajesPorTipo[tipo] = (mensajesPorTipo[tipo] || 0) + 1;
 
-          const txt = texto.trim();
           const prefijo = settings.prefix || ".";
+          if (!texto.startsWith(prefijo)) continue;
 
-          if (!txt.startsWith(prefijo)) continue;
-
-          const body = txt.slice(prefijo.length).trim();
+          const body = texto.slice(prefijo.length).trim();
           if (!body) continue;
 
           const args = body.split(/\s+/);
-          const comando = args.shift()?.toLowerCase();
+          const comando = String(args.shift() || "").toLowerCase();
 
           const cmd = comandos.get(comando);
           if (!cmd) continue;
@@ -497,13 +586,16 @@ async function iniciarBot() {
 
           await cmd.run({
             sock,
-            m: msg,
-            msg,
+            m,
+            msg: m,
             from,
+            chat: from,
+            sender: m.sender,
+            isGroup: m.isGroup,
+            text: m.text,
+            body: m.body,
+            quoted: m.quoted,
             args,
-            text: msg.text,
-            body: msg.body,
-            quoted: msg.quoted,
             settings,
             comandos,
           });
@@ -531,6 +623,12 @@ process.on("SIGINT", () => {
     rl.close();
   } catch {}
 
+  try {
+    if (sockGlobal?.end) {
+      sockGlobal.end(undefined);
+    }
+  } catch {}
+
   console.log("Bot apagado");
-  process.exit();
+  process.exit(0);
 });
