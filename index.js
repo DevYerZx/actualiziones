@@ -82,10 +82,93 @@ function normalizeProcessBotId(value = "") {
   return "all";
 }
 
-const PROCESS_BOT_ID = normalizeProcessBotId(
-  process.env.BOT_ID || process.env.BOT_INSTANCE || process.env.DVYER_BOT_ID || "all"
-);
-const SPLIT_PROCESS_MODE = PROCESS_BOT_ID !== "all";
+function isManagedHostingEnvironment(env = process.env) {
+  return Boolean(
+    env?.RAILWAY_ENVIRONMENT ||
+      env?.RENDER ||
+      env?.PTERODACTYL_SERVER_UUID ||
+      env?.SERVER_ID ||
+      env?.KOYEB_SERVICE_NAME ||
+      env?.DYNO
+  );
+}
+
+function isPm2Environment(env = process.env) {
+  return Boolean(env?.pm_id || env?.PM2_HOME);
+}
+
+function detectProcessBotIdFromPm2Name(env = process.env) {
+  const rawName = String(env?.name || env?.pm_name || "").trim().toLowerCase();
+  if (!rawName) return "all";
+
+  const normalizedName = rawName
+    .replace(/^dvyer[-_\s]*/, "")
+    .replace(/^bot[-_\s]*/, "");
+
+  const direct = normalizeProcessBotId(normalizedName);
+  if (direct !== "all") {
+    return direct;
+  }
+
+  const slotMatch = rawName.match(/subbot[-_\s]?(\d{1,2})$/);
+  if (slotMatch) {
+    return `subbot${Number.parseInt(slotMatch[1], 10)}`;
+  }
+
+  if (rawName.endsWith("main")) {
+    return "main";
+  }
+
+  return "all";
+}
+
+function resolveProcessRuntime(env = process.env) {
+  const explicitBotId = normalizeProcessBotId(
+    env?.BOT_ID || env?.BOT_INSTANCE || env?.DVYER_BOT_ID || "all"
+  );
+
+  if (explicitBotId !== "all") {
+    return {
+      processBotId: explicitBotId,
+      splitProcessMode: true,
+      modeLabel: `SEPARADO (${explicitBotId})`,
+      autoDetected: false,
+    };
+  }
+
+  if (isManagedHostingEnvironment(env)) {
+    return {
+      processBotId: "all",
+      splitProcessMode: false,
+      modeLabel: "AUTO HOSTING (UNICO)",
+      autoDetected: true,
+    };
+  }
+
+  if (isPm2Environment(env)) {
+    const pm2BotId = detectProcessBotIdFromPm2Name(env);
+    if (pm2BotId !== "all") {
+      return {
+        processBotId: pm2BotId,
+        splitProcessMode: true,
+        modeLabel: `AUTO VPS (${pm2BotId})`,
+        autoDetected: true,
+      };
+    }
+  }
+
+  return {
+    processBotId: "all",
+    splitProcessMode: false,
+    modeLabel: isPm2Environment(env) ? "PM2 UNICO" : "UNICO",
+    autoDetected: true,
+  };
+}
+
+const PROCESS_RUNTIME = resolveProcessRuntime(process.env);
+const PROCESS_BOT_ID = PROCESS_RUNTIME.processBotId;
+const SPLIT_PROCESS_MODE = PROCESS_RUNTIME.splitProcessMode;
+const PROCESS_MODE_LABEL = PROCESS_RUNTIME.modeLabel;
 
 function clampSubbotSlots(value) {
   const parsed = Number(value || 0);
@@ -1538,7 +1621,7 @@ function quoteForSh(value) {
 }
 
 function getRestartMode() {
-  if (process.env.pm_id || process.env.PM2_HOME) {
+  if (isPm2Environment(process.env)) {
     return {
       kind: "pm2",
       label: "PM2/VPS",
@@ -1546,14 +1629,7 @@ function getRestartMode() {
     };
   }
 
-  if (
-    process.env.RAILWAY_ENVIRONMENT ||
-    process.env.RENDER ||
-    process.env.PTERODACTYL_SERVER_UUID ||
-    process.env.SERVER_ID ||
-    process.env.KOYEB_SERVICE_NAME ||
-    process.env.DYNO
-  ) {
+  if (isManagedHostingEnvironment(process.env)) {
     return {
       kind: "managed",
       label: "Hosting administrado",
@@ -1655,7 +1731,7 @@ function banner() {
     chalk.yellow("\nComandos cargados :"),
     comandos.size,
     chalk.magenta("\nModo proceso :"),
-    SPLIT_PROCESS_MODE ? `SEPARADO (${PROCESS_BOT_ID})` : "UNICO",
+    PROCESS_MODE_LABEL,
     chalk.cyan("\nEste proceso maneja :"),
     managedLabels,
     chalk.magenta("\nBots habilitados :"),
