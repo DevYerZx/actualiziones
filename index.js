@@ -564,11 +564,11 @@ function obtenerTexto(message) {
     msg?.videoMessage?.caption ||
     msg?.documentMessage?.caption ||
     extractInteractiveResponseId(msg) ||
-    msg?.buttonsResponseMessage?.selectedDisplayText ||
     msg?.buttonsResponseMessage?.selectedButtonId ||
+    msg?.buttonsResponseMessage?.selectedDisplayText ||
     msg?.templateButtonReplyMessage?.selectedId ||
-    msg?.listResponseMessage?.title ||
     msg?.listResponseMessage?.singleSelectReply?.selectedRowId ||
+    msg?.listResponseMessage?.title ||
     ""
   );
 }
