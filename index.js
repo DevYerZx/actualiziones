@@ -525,6 +525,27 @@ function resolveConfiguredBotPhoto(config = {}) {
   return String(slotConfig?.photo || settings?.system?.subbotPhoto || "").trim();
 }
 
+function resolveLocalProfilePhotoPath(input = "") {
+  const rawInput = String(input || "").trim();
+  if (!rawInput || /^https?:\/\//i.test(rawInput)) {
+    return null;
+  }
+
+  const basePath = path.isAbsolute(rawInput) ? rawInput : path.join(process.cwd(), rawInput);
+  const extension = path.extname(basePath).toLowerCase();
+  const candidates = extension
+    ? [basePath]
+    : [".jpg", ".jpeg", ".png", ".webp"].map((suffix) => `${basePath}${suffix}`);
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return null;
+}
+
 async function resolveBotProfilePhotoSource(config = {}) {
   const input = resolveConfiguredBotPhoto(config);
   if (!input) return null;
@@ -549,9 +570,9 @@ async function resolveBotProfilePhotoSource(config = {}) {
     };
   }
 
-  const localPath = path.isAbsolute(input) ? input : path.join(process.cwd(), input);
-  if (!fs.existsSync(localPath)) {
-    throw new Error("La ruta local de la foto de perfil no existe.");
+  const localPath = resolveLocalProfilePhotoPath(input);
+  if (!localPath || !fs.existsSync(localPath)) {
+    throw new Error("La ruta local de la foto de perfil no existe o no encontre una imagen compatible.");
   }
 
   return {

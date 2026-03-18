@@ -135,7 +135,7 @@
   "system": {
     "autoProfileOnConnect": true,
     "mainBotBio": "Ya conectado bot Fsociety",
-    "mainBotPhoto": "assets/profile/fsociety-bot-profile.png",
+    "mainBotPhoto": "assets/profile/fsociety-bot-profile",
     "subbotBioTemplate": "Subbot Fsociety activo",
     "subbotPhoto": ""
   },
