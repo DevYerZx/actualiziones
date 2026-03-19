@@ -1,6 +1,4 @@
-import fs from "fs";
-import path from "path";
-import { generateWAMessageFromContent, prepareWAMessageMedia } from "@whiskeysockets/baileys";
+import { generateWAMessageFromContent } from "@whiskeysockets/baileys";
 
 function formatUptime(seconds) {
   seconds = Math.floor(Number(seconds || 0));
@@ -65,66 +63,6 @@ function buildRows(categories, prefix) {
   return rows;
 }
 
-function resolveHeaderMedia() {
-  const videoBase = path.join(process.cwd(), "videos", "menu-video");
-  const imageBase = path.join(process.cwd(), "imagenes", "menu");
-  const candidates = [
-    `${videoBase}.mp4`,
-    `${videoBase}.mov`,
-    `${imageBase}.png`,
-    `${imageBase}.jpg`,
-    `${imageBase}.jpeg`,
-    `${imageBase}.webp`,
-  ];
-
-  for (const filePath of candidates) {
-    try {
-      if (fs.existsSync(filePath) && fs.statSync(filePath).size > 128) {
-        return filePath;
-      }
-    } catch {}
-  }
-
-  return "";
-}
-
-async function buildHeader(sock) {
-  const mediaPath = resolveHeaderMedia();
-  const header = {
-    title: "MENU PRINCIPAL",
-    hasMediaAttachment: false,
-  };
-
-  if (!mediaPath) return header;
-
-  const isVideo = /\.(mp4|mov)$/i.test(mediaPath);
-  const media = await prepareWAMessageMedia(
-    isVideo
-      ? {
-          video: fs.readFileSync(mediaPath),
-          gifPlayback: false,
-        }
-      : {
-          image: fs.readFileSync(mediaPath),
-        },
-    { upload: sock.waUploadToServer }
-  );
-
-  if (isVideo) {
-    return {
-      title: "MENU PRINCIPAL",
-      hasMediaAttachment: true,
-      videoMessage: media.videoMessage,
-    };
-  }
-
-  return {
-    title: "MENU PRINCIPAL",
-    hasMediaAttachment: true,
-    imageMessage: media.imageMessage,
-  };
-}
-
 export default {
   name: "catalogoprueba",
   command: ["catalogoprueba", "catalogotest", "menulista"],
@@ -137,11 +75,8 @@ export default {
       const uptime = formatUptime(process.uptime());
       const categories = buildCategoryMap(comandos);
       const rows = buildRows(categories, prefix);
-      const header = await buildHeader(sock);
 
-      console.log(
-        `CATALOGO PRUEBA SEND chat=${from} filas=${rows.length} media=${header.hasMediaAttachment}`
-      );
+      console.log(`CATALOGO PRUEBA SEND chat=${from} filas=${rows.length} media=false`);
 
       const interactiveMessage = {
         body: {
@@ -162,7 +97,10 @@ export default {
         footer: {
           text: "Fsociety bot",
         },
-        header,
+        header: {
+          title: "MENU PRINCIPAL",
+          hasMediaAttachment: false,
+        },
         nativeFlowMessage: {
           buttons: [
             {
