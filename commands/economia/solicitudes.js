@@ -7,7 +7,7 @@ import {
 
 export default {
   name: "solicitudes",
-  command: ["solicitudes", "requests", "reqs", "misdescargas"],
+  command: ["solicitudes", "requests", "reqs", "misdescargas", "req", "misreq"],
   category: "economia",
   description: "Muestra tus solicitudes de descargas y el costo actual",
 

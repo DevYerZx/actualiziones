@@ -1,6 +1,7 @@
 import {
   formatCoins,
   gambleCoins,
+  getPrefix,
 } from "./_shared.js";
 
 export default {
@@ -9,14 +10,15 @@ export default {
   category: "economia",
   description: "Apuesta dolares para intentar ganar mas",
 
-  run: async ({ sock, msg, from, sender, args = [] }) => {
+  run: async ({ sock, msg, from, sender, args = [], settings }) => {
     const amount = Number(args[0] || 0);
+    const prefix = getPrefix(settings);
 
     if (!amount) {
       return sock.sendMessage(
         from,
         {
-          text: "Uso: .apostar 300",
+          text: `Uso: ${prefix}apostar 300`,
           ...global.channelInfo,
         },
         { quoted: msg }

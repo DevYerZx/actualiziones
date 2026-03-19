@@ -1,6 +1,7 @@
 import {
   formatCoins,
   formatUserLabel,
+  getPrefix,
   transferCoins,
 } from "./_shared.js";
 
@@ -15,15 +16,16 @@ export default {
   category: "economia",
   description: "Transfiere dolares a otro usuario",
 
-  run: async ({ sock, msg, from, sender, args = [] }) => {
+  run: async ({ sock, msg, from, sender, args = [], settings }) => {
     const target = normalizeTarget(args[0]);
     const amount = Number(args[1] || 0);
+    const prefix = getPrefix(settings);
 
     if (!target || !amount) {
       return sock.sendMessage(
         from,
         {
-          text: "Uso: .transferir 519xxxxxxxx 300",
+          text: `Uso: ${prefix}transferir 519xxxxxxxx 300`,
           ...global.channelInfo,
         },
         { quoted: msg }

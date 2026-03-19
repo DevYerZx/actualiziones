@@ -6,7 +6,7 @@ import {
 
 export default {
   name: "buyrequests",
-  command: ["buyrequests", "comprarsolicitudes", "buyreq", "comprarreq"],
+  command: ["buyrequests", "comprarsolicitudes", "buyreq", "comprarreq", "comprarsol", "buysol"],
   category: "economia",
   description: "Compra solicitudes extra de descarga con tus dolares",
 

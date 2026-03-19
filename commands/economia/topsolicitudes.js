@@ -2,7 +2,7 @@ import { formatUserLabel, getTopRequestUsers } from "./_shared.js";
 
 export default {
   name: "topsolicitudes",
-  command: ["topsolicitudes", "toprequests", "rankrequests"],
+  command: ["topsolicitudes", "toprequests", "rankrequests", "topreq", "topsol"],
   category: "economia",
   description: "Muestra el ranking de usuarios por solicitudes usadas",
 

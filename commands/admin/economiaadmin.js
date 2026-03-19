@@ -37,14 +37,51 @@ function getStatusText(settings) {
 
 export default {
   name: "economiaadmin",
-  command: ["economiaadmin", "billing", "cobrodescargas", "ecoadmin"],
+  command: ["economiaadmin", "billing", "cobrodescargas", "ecoadmin", "economyadmin"],
   category: "admin",
   ownerOnly: true,
   description: "Administra el cobro de descargas, dolares y solicitudes",
 
   run: async ({ sock, msg, from, args = [], settings }) => {
-    const action = String(args[0] || "status").trim().toLowerCase();
+    let action = String(args[0] || "status").trim().toLowerCase();
     const prefix = getPrefix(settings);
+
+    if (["on", "off", "activar", "desactivar", "enable", "disable"].includes(action)) {
+      args = ["mode", ["activar", "enable"].includes(action) ? "on" : ["desactivar", "disable"].includes(action) ? "off" : action, ...args.slice(1)];
+      action = "mode";
+    }
+
+    if (["gratis", "limite", "límite"].includes(action)) {
+      action = "daily";
+    }
+
+    if (["cost", "costo", "coste"].includes(action)) {
+      action = "price";
+    }
+
+    if (["adddolares", "sumardolares", "agregardolares"].includes(action)) {
+      action = "addusd";
+    }
+
+    if (["quitardolares", "removedolares", "restardolares"].includes(action)) {
+      action = "removeusd";
+    }
+
+    if (["fijardolares", "setdolares", "saldofijo"].includes(action)) {
+      action = "setusd";
+    }
+
+    if (["addsolicitudes", "sumarsolicitudes", "agregarsolicitudes"].includes(action)) {
+      action = "addreq";
+    }
+
+    if (["quitarsolicitudes", "removesolicitudes", "restarsolicitudes"].includes(action)) {
+      action = "removereq";
+    }
+
+    if (["fijarsolicitudes", "setsolicitudes", "solicitudesfijas"].includes(action)) {
+      action = "setreq";
+    }
 
     if (["status", "estado", "info"].includes(action)) {
       return sock.sendMessage(
@@ -184,6 +221,7 @@ export default {
           text:
             `Usos:\n` +
             `${prefix}economiaadmin mode on\n` +
+            `${prefix}economiaadmin off\n` +
             `${prefix}economiaadmin daily 50\n` +
             `${prefix}economiaadmin price 25\n` +
             `${prefix}economiaadmin addusd 519xxxxxxxx 500\n` +

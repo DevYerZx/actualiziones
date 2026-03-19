@@ -8,7 +8,7 @@ import {
 
 export default {
   name: "coins",
-  command: ["coins", "balance", "wallet", "cartera", "dolares", "saldo"],
+  command: ["coins", "balance", "wallet", "cartera", "dolares", "saldo", "usd", "dinero"],
   category: "economia",
   description: "Muestra tus dolares, solicitudes e inventario",
 
