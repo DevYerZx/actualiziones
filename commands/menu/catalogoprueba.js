@@ -1,4 +1,4 @@
-import { generateWAMessageFromContent } from "@whiskeysockets/baileys";
+import { generateWAMessageFromContent, proto } from "@whiskeysockets/baileys";
 
 function formatUptime(seconds) {
   seconds = Math.floor(Number(seconds || 0));
@@ -78,8 +78,8 @@ export default {
 
       console.log(`CATALOGO PRUEBA SEND chat=${from} filas=${rows.length} media=false`);
 
-      const interactiveMessage = {
-        body: {
+      const interactiveMessage = proto.Message.InteractiveMessage.create({
+        body: proto.Message.InteractiveMessage.Body.create({
           text:
             "MENU PRINCIPAL\n" +
             "[ MENU ]\n" +
@@ -93,15 +93,15 @@ export default {
             })}\n` +
             `Uptime: ${uptime}\n\n` +
             "Elige una categoria",
-        },
-        footer: {
+        }),
+        footer: proto.Message.InteractiveMessage.Footer.create({
           text: "Fsociety bot",
-        },
-        header: {
+        }),
+        header: proto.Message.InteractiveMessage.Header.create({
           title: "MENU PRINCIPAL",
           hasMediaAttachment: false,
-        },
-        nativeFlowMessage: {
+        }),
+        nativeFlowMessage: proto.Message.InteractiveMessage.NativeFlowMessage.create({
           buttons: [
             {
               name: "single_select",
@@ -117,14 +117,18 @@ export default {
             },
           ],
           messageParamsJson: "",
-        },
-      };
+        }),
+      });
 
       const message = generateWAMessageFromContent(
         from,
         {
           viewOnceMessage: {
             message: {
+              messageContextInfo: {
+                deviceListMetadata: {},
+                deviceListMetadataVersion: 2,
+              },
               interactiveMessage,
             },
           },
