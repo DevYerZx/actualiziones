@@ -78,8 +78,16 @@ export function normalizeJidUser(value = "") {
 }
 
 export function formatUserLabel(value = "") {
-  const digits = normalizeJidUser(value).replace(/[^\d]/g, "");
-  return digits ? `+${digits}` : normalizeJidUser(value) || "Desconocido";
+  const normalizedId = normalizeJidUser(value);
+  const storedUser = normalizedId ? state.users[normalizedId] : null;
+  const digits = String(storedUser?.phone || normalizedId || "").replace(/[^\d]/g, "");
+  const phoneLabel = digits ? `+${digits}` : normalizedId || "Desconocido";
+  const nameLabel = String(storedUser?.lastKnownName || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+
+  return nameLabel ? `${nameLabel} (${phoneLabel})` : phoneLabel;
 }
 
 export function formatCoins(value = 0) {
