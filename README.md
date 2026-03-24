@@ -1,6 +1,18 @@
-# FSociety Bot
+<p align="center">
+  <img src="assets/profile/fsociety-bot-profile.png" alt="FSociety Bot" width="150" />
+</p>
 
+<h1 align="center">FSociety Bot</h1>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/Node.js-18%2B-43853D?style=for-the-badge&logo=node.js&logoColor=white" alt="Node.js 18+" />
+  <img src="https://img.shields.io/badge/Baileys-MultiBot-25D366?style=for-the-badge&logo=whatsapp&logoColor=white" alt="Baileys MultiBot" />
+  <img src="https://img.shields.io/badge/PM2-Ready-2B037A?style=for-the-badge&logo=pm2&logoColor=white" alt="PM2 Ready" />
+</p>
+
+<p align="center">
 Bot de WhatsApp multi-instancia hecho con Baileys, pensado para correr como bot principal y tambien como sistema de subbots. Incluye comandos de administracion, descargas, juegos, economia, utilidades de grupo, herramientas de sistema y paneles de control para VPS y hosting.
+</p>
 
 ## Tabla De Contenido
 
@@ -69,7 +81,7 @@ npm install
 npm start
 ```
 
-## Instalacion En Termux
+## <img src="https://cdn.simpleicons.org/android/3DDC84" alt="Termux" width="18" /> Instalacion En Termux
 
 ### 1. Actualiza paquetes
 
@@ -110,7 +122,7 @@ Si Termux te da problemas de memoria durante `npm install`, prueba:
 npm cache clean --force
 ```
 
-## Instalacion En PC O VPS Linux
+## <img src="https://cdn.simpleicons.org/linux/FCC624" alt="Linux" width="18" /> Instalacion En PC O VPS Linux
 
 ### Ubuntu o Debian
 
@@ -154,7 +166,7 @@ npm install
 npm start
 ```
 
-## Ejecucion Con PM2
+## <img src="https://cdn.simpleicons.org/pm2/2B037A" alt="PM2" width="18" /> Ejecucion Con PM2
 
 Ideal para VPS o servidores donde quieras que el bot se reinicie solo.
 
@@ -192,6 +204,13 @@ pm2 startup
 El archivo `ecosystem.config.cjs` ya esta preparado para levantar `main` y los subbots activos cuando corresponda.
 
 ## Uso En Hosting
+
+<p>
+  <img src="https://cdn.simpleicons.org/railway" alt="Railway" width="18" />
+  <img src="https://cdn.simpleicons.org/render" alt="Render" width="18" />
+  <img src="https://cdn.simpleicons.org/pterodactyl" alt="Pterodactyl" width="18" />
+  <img src="https://cdn.simpleicons.org/koyeb" alt="Koyeb" width="18" />
+</p>
 
 Este proyecto detecta varios entornos administrados como:
 
@@ -243,7 +262,7 @@ Ejemplo rapido:
 ```json
 {
   "botName": "Fsociety bot",
-  "ownerName": "Tu nombre",
+  "ownerName": "DVYER",
   "prefix": [".", "/", "!", "#"],
   "ownerNumbers": ["51999999999"],
   "botNumber": "51999999999",
@@ -251,7 +270,7 @@ Ejemplo rapido:
 }
 ```
 
-## Primer Vinculado
+## <img src="https://cdn.simpleicons.org/whatsapp/25D366" alt="WhatsApp" width="18" /> Primer Vinculado
 
 En el primer arranque, el bot principal puede pedirte el numero por consola para generar el pairing code.
 
