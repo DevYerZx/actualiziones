@@ -3,6 +3,10 @@
   "version": "1.0.0",
   "type": "module",
   "main": "index.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DevYerZx/fsociety-bot.git"
+  },
   "scripts": {
     "start": "node index.js",
     "check": "node --check index.js",
