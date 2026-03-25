@@ -74,6 +74,36 @@ const settings = JSON.parse(
   fs.readFileSync("./settings/settings.json", "utf-8")
 );
 
+const INTERNAL_WEBHOOK_TOKEN = String(
+  process.env.INTERNAL_WEBHOOK_TOKEN || process.env.BOT_WEBHOOK_TOKEN || ""
+).trim();
+const PANEL_CALLBACK_URL = (() => {
+  const explicitUrl = String(process.env.PANEL_CALLBACK_URL || "").trim();
+
+  if (explicitUrl) {
+    return explicitUrl;
+  }
+
+  const panelBaseUrl = String(process.env.PANEL_BASE_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
+
+  return panelBaseUrl ? `${panelBaseUrl}/api/bot/pairing` : "";
+})();
+const PANEL_CALLBACK_TOKEN = String(
+  process.env.PANEL_CALLBACK_TOKEN ||
+    process.env.PANEL_BOT_API_TOKEN ||
+    process.env.BOT_API_TOKEN ||
+    ""
+).trim();
+const INTERNAL_ALLOWED_IPS = new Set(
+  String(process.env.INTERNAL_WEBHOOK_ALLOWED_IPS || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean)
+);
+const DASHBOARD_TOKEN = String(process.env.DASHBOARD_TOKEN || "").trim();
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const SETTINGS_FILE = path.join(__dirname, "settings", "settings.json");
@@ -2198,6 +2228,237 @@ function quoteForSh(value) {
   return `'${String(value || "").replace(/'/g, `'\"'\"'`)}'`;
 }
 
+function normalizeRemoteIp(value = "") {
+  const raw = String(value || "").trim();
+
+  if (!raw) {
+    return "";
+  }
+
+  if (raw.startsWith("::ffff:")) {
+    return raw.slice(7);
+  }
+
+  return raw;
+}
+
+function getRequestIp(req) {
+  const forwarded = String(req?.headers?.["x-forwarded-for"] || "")
+    .split(",")[0]
+    .trim();
+
+  return normalizeRemoteIp(
+    forwarded ||
+      req?.socket?.remoteAddress ||
+      req?.connection?.remoteAddress ||
+      ""
+  );
+}
+
+function isIpAllowed(req) {
+  if (!INTERNAL_ALLOWED_IPS.size) {
+    return true;
+  }
+
+  return INTERNAL_ALLOWED_IPS.has(getRequestIp(req));
+}
+
+function resolveRequestUrl(req) {
+  return new URL(String(req?.url || "/"), "http://127.0.0.1");
+}
+
+function getRequestTokenFromHeaders(req, headerNames = []) {
+  for (const headerName of headerNames) {
+    const headerValue = req?.headers?.[headerName];
+
+    if (typeof headerValue === "string" && headerValue.trim()) {
+      return headerValue.trim();
+    }
+  }
+
+  const authorization = String(req?.headers?.authorization || "").trim();
+
+  if (authorization.startsWith("Bearer ")) {
+    return authorization.slice(7).trim();
+  }
+
+  return "";
+}
+
+function isTokenAuthorized(req, expectedToken, headerNames = []) {
+  if (!expectedToken) {
+    return true;
+  }
+
+  const url = resolveRequestUrl(req);
+  const candidate =
+    getRequestTokenFromHeaders(req, headerNames) ||
+    String(url.searchParams.get("token") || "").trim();
+
+  return candidate === expectedToken;
+}
+
+function writeJson(res, statusCode, payload) {
+  res.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8",
+  });
+  res.end(JSON.stringify(payload, null, 2));
+}
+
+function readJsonBody(req, options = {}) {
+  const maxBytes = Math.max(
+    1024,
+    Math.min(256 * 1024, Number(options.maxBytes || 64 * 1024) || 64 * 1024)
+  );
+
+  return new Promise((resolve, reject) => {
+    let raw = "";
+
+    req.on("data", (chunk) => {
+      raw += chunk;
+
+      if (Buffer.byteLength(raw, "utf8") > maxBytes) {
+        const error = new Error("El cuerpo excede el limite permitido.");
+        error.statusCode = 413;
+        req.destroy(error);
+      }
+    });
+
+    req.on("end", () => {
+      try {
+        resolve(raw ? JSON.parse(raw) : {});
+      } catch {
+        const error = new Error("JSON invalido.");
+        error.statusCode = 400;
+        reject(error);
+      }
+    });
+
+    req.on("error", (error) => {
+      if (!error.statusCode) {
+        error.statusCode = 400;
+      }
+
+      reject(error);
+    });
+  });
+}
+
+function resolvePanelCallbackConfig(payload = {}) {
+  const bodyCallbackUrl = String(payload?.panelPairingUrl || "").trim();
+  const bodyCallbackToken = String(payload?.panelBotToken || "").trim();
+
+  return {
+    callbackUrl: PANEL_CALLBACK_URL || bodyCallbackUrl,
+    callbackToken: PANEL_CALLBACK_TOKEN || bodyCallbackToken,
+  };
+}
+
+function mapRuntimePairingResultToPanelPayload(requestToken, result = {}) {
+  if (result?.ok) {
+    return {
+      requestToken,
+      pairingCode: result.code,
+      pairingStatus: "code_ready",
+      pairingMessage:
+        result.cached === true
+          ? `Codigo recuperado desde cache para ${result.displayName || "el subbot"}.`
+          : `Codigo generado por ${result.displayName || "el bot principal"}.`,
+      pairingExpiresAt: result.expiresInMs
+        ? new Date(Date.now() + Number(result.expiresInMs)).toISOString()
+        : null,
+    };
+  }
+
+  const failedStatuses = new Set([
+    "missing_bot",
+    "main_not_ready",
+    "already_linked",
+    "missing_number",
+    "slot_busy",
+    "no_capacity",
+    "error",
+  ]);
+  const pairingStatus = failedStatuses.has(String(result?.status || "").trim())
+    ? "failed"
+    : "processing";
+
+  return {
+    requestToken,
+    pairingStatus,
+    pairingMessage:
+      result?.message ||
+      "La solicitud fue aceptada por el bot y sigue en proceso.",
+  };
+}
+
+async function sendPanelPairingUpdate(callbackUrl, callbackToken, payload) {
+  if (!callbackUrl || !callbackToken || !payload?.requestToken) {
+    return {
+      ok: false,
+      status: "missing_callback_config",
+    };
+  }
+
+  const response = await fetch(callbackUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-bot-token": callbackToken,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(
+      `El panel respondio ${response.status} al callback del pairing. ${errorText}`.trim()
+    );
+  }
+
+  return {
+    ok: true,
+    status: "sent",
+  };
+}
+
+async function processInternalSubbotRequest(payload = {}) {
+  const requestToken = String(payload?.requestToken || "").trim();
+  const phoneNumber = sanitizePhoneNumber(payload?.phoneNumber);
+
+  if (!requestToken || !phoneNumber) {
+    return {
+      ok: false,
+      status: "invalid_request",
+      message: "Faltan requestToken o phoneNumber.",
+    };
+  }
+
+  const result = await global.botRuntime.requestBotPairingCode("subbot", {
+    number: phoneNumber,
+    requesterNumber: phoneNumber,
+    requesterJid: `panel:${requestToken}`,
+    useCache: payload?.useCache !== false,
+  });
+  const { callbackUrl, callbackToken } = resolvePanelCallbackConfig(payload);
+  const panelPayload = mapRuntimePairingResultToPanelPayload(requestToken, result);
+
+  if (callbackUrl && callbackToken) {
+    try {
+      await sendPanelPairingUpdate(callbackUrl, callbackToken, panelPayload);
+    } catch (error) {
+      console.error("[internal-webhook] No pude enviar el callback al panel:", error?.message || error);
+    }
+  }
+
+  return {
+    ok: true,
+    accepted: true,
+    result,
+    panelPayload,
+  };
+}
+
 function getRestartMode() {
   if (isPm2Environment(process.env)) {
     return {
@@ -2311,15 +2572,113 @@ function getDashboardSnapshot() {
 function ensureDashboardServer() {
   if (!dashboardState.enabled || dashboardServer) return;
 
-  dashboardServer = http.createServer((req, res) => {
-    const url = String(req?.url || "/");
+  dashboardServer = http.createServer(async (req, res) => {
+    const requestUrl = resolveRequestUrl(req);
+    const pathname = requestUrl.pathname;
+    const method = String(req?.method || "GET").trim().toUpperCase();
 
-    if (url.startsWith("/json")) {
+    if (pathname === "/internal/subbot/request") {
+      if (method !== "POST") {
+        writeJson(res, 405, {
+          message: "Metodo no permitido.",
+        });
+        return;
+      }
+
+      if (!INTERNAL_WEBHOOK_TOKEN) {
+        writeJson(res, 503, {
+          message: "Configura INTERNAL_WEBHOOK_TOKEN o BOT_WEBHOOK_TOKEN antes de exponer este endpoint.",
+        });
+        return;
+      }
+
+      if (!isIpAllowed(req)) {
+        writeJson(res, 403, {
+          message: "IP no autorizada para el webhook interno.",
+        });
+        return;
+      }
+
+      if (
+        !isTokenAuthorized(req, INTERNAL_WEBHOOK_TOKEN, [
+          "x-bot-webhook-token",
+          "x-internal-token",
+        ])
+      ) {
+        writeJson(res, 401, {
+          message: "Token del webhook interno invalido.",
+        });
+        return;
+      }
+
+      try {
+        const body = await readJsonBody(req);
+        const requestToken = String(body?.requestToken || "").trim();
+        const phoneNumber = sanitizePhoneNumber(body?.phoneNumber);
+
+        if (!requestToken || !phoneNumber) {
+          writeJson(res, 400, {
+            message: "Debes enviar requestToken y phoneNumber.",
+          });
+          return;
+        }
+
+        const callbackConfig = resolvePanelCallbackConfig(body);
+        const hasAsyncCallback =
+          Boolean(callbackConfig.callbackUrl) && Boolean(callbackConfig.callbackToken);
+
+        if (hasAsyncCallback) {
+          Promise.resolve()
+            .then(() => processInternalSubbotRequest(body))
+            .catch((error) => {
+              console.error("[internal-webhook] Error procesando solicitud:", error?.message || error);
+            });
+
+          writeJson(res, 202, {
+            accepted: true,
+            requestToken,
+            pairingStatus: "processing",
+            pairingMessage:
+              "Solicitud aceptada por el bot principal. El codigo se enviara al panel cuando este listo.",
+          });
+          return;
+        }
+
+        const outcome = await processInternalSubbotRequest(body);
+        writeJson(res, 200, {
+          accepted: true,
+          requestToken,
+          ...outcome.panelPayload,
+        });
+        return;
+      } catch (error) {
+        writeJson(res, error?.statusCode || 500, {
+          message: error?.message || "No pude procesar la solicitud del subbot.",
+        });
+        return;
+      }
+    }
+
+    if (pathname.startsWith("/json")) {
+      if (!isTokenAuthorized(req, DASHBOARD_TOKEN, ["x-dashboard-token", "x-api-key"])) {
+        writeJson(res, 401, {
+          message: "Token de dashboard invalido.",
+        });
+        return;
+      }
+
       const payload = JSON.stringify(getDashboardSnapshot(), null, 2);
       res.writeHead(200, {
         "content-type": "application/json; charset=utf-8",
       });
       res.end(payload);
+      return;
+    }
+
+    if (!isTokenAuthorized(req, DASHBOARD_TOKEN, ["x-dashboard-token", "x-api-key"])) {
+      writeJson(res, 401, {
+        message: "Token de dashboard invalido.",
+      });
       return;
     }
 

@@ -26,6 +26,7 @@ Bot de WhatsApp multi-instancia hecho con Baileys, pensado para correr como bot 
 - [Ejecucion Con PM2](#ejecucion-con-pm2)
 - [Uso En Hosting](#uso-en-hosting)
 - [Configuracion Inicial](#configuracion-inicial)
+- [Webhook Interno Seguro](#webhook-interno-seguro)
 - [Primer Vinculado](#primer-vinculado)
 - [Subbots](#subbots)
 - [Scripts Disponibles](#scripts-disponibles)
@@ -269,6 +270,65 @@ Ejemplo rapido:
   "pairingNumber": ""
 }
 ```
+
+## Webhook Interno Seguro
+
+Si quieres conectar este bot a un panel web para pedir subbots desde una pagina, este repo ya puede recibir solicitudes internas sin exponer datos sensibles del VPS.
+
+### Variables recomendadas
+
+Usa el archivo `.env.example` como base:
+
+```bash
+cp .env.example .env
+```
+
+Variables:
+
+| Variable | Uso |
+| --- | --- |
+| `INTERNAL_WEBHOOK_TOKEN` | token obligatorio para `POST /internal/subbot/request` |
+| `INTERNAL_WEBHOOK_ALLOWED_IPS` | lista opcional de IPs permitidas para el webhook |
+| `PANEL_BASE_URL` | URL base del panel, por ejemplo `https://panel.midominio.com` |
+| `PANEL_CALLBACK_URL` | opcional, si quieres fijar la ruta exacta del callback |
+| `PANEL_CALLBACK_TOKEN` | token que el bot usara para responder al panel |
+| `DASHBOARD_TOKEN` | protege `/json` si decides publicarlo |
+
+### Endpoint interno
+
+Ruta:
+
+`POST /internal/subbot/request`
+
+Header:
+
+`x-bot-webhook-token: <INTERNAL_WEBHOOK_TOKEN>`
+
+Payload minimo:
+
+```json
+{
+  "requestToken": "abc123",
+  "phoneNumber": "51999111222",
+  "subbotName": "subbot-demo",
+  "ownerName": "dvyer"
+}
+```
+
+### Seguridad
+
+- no expone la IP, la ruta SSH ni las llaves del VPS
+- no devuelve secretos al cliente publico
+- puede limitarse por token e IP
+- el callback del panel puede quedar fijo por `.env`
+- `/json` y el HTML del dashboard pueden protegerse con `DASHBOARD_TOKEN`
+
+### Flujo
+
+1. El panel llama al webhook interno del bot.
+2. El bot genera el pairing code usando su runtime real.
+3. Cuando el codigo esta listo, el bot envia `POST /api/bot/pairing` al panel.
+4. La web publica muestra el codigo sin hablar directo con WhatsApp.
 
 ## <img src="https://cdn.simpleicons.org/whatsapp/25D366" alt="WhatsApp" width="18" /> Primer Vinculado
 

@@ -9,6 +9,7 @@ yarn-error.log*
 pnpm-debug.log*
 .env
 .env.*
+!.env.example
 dvyer-session/
 dvyer-session*/
 dvyer-session-subbot/
