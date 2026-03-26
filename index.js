@@ -66,6 +66,8 @@ const PROCESS_RESTART_DELAY_MS = 3000;
 const SETTINGS_SYNC_INTERVAL_MS = 4000;
 const BOT_RUNTIME_STATE_TTL_MS = 20_000;
 const REMOTE_PAIRING_WAIT_MS = 18_000;
+const PANEL_SUBBOT_CALLBACK_WAIT_MS = 90_000;
+const PANEL_SUBBOT_CALLBACK_POLL_MS = 4_000;
 const SESSION_REPLACED_BLOCK_MS = 15 * 60 * 1000;
 const PROFILE_APPLY_DELAY_MS = 15 * 1000;
 const logger = pino({ level: "silent" });
@@ -2509,12 +2511,30 @@ async function processInternalSubbotRequest(payload = {}) {
     };
   }
 
-  const result = await global.botRuntime.requestBotPairingCode("subbot", {
+  let result = await global.botRuntime.requestBotPairingCode("subbot", {
     number: phoneNumber,
     requesterNumber: phoneNumber,
     requesterJid: `panel:${requestToken}`,
     useCache: payload?.useCache !== false,
   });
+
+  const pendingStatuses = new Set(["pending", "pending_remote", "unavailable"]);
+  const timeoutAt =
+    Date.now() + Math.max(PANEL_SUBBOT_CALLBACK_POLL_MS, PANEL_SUBBOT_CALLBACK_WAIT_MS);
+
+  while (
+    pendingStatuses.has(String(result?.status || "").trim()) &&
+    Date.now() < timeoutAt
+  ) {
+    await delay(PANEL_SUBBOT_CALLBACK_POLL_MS);
+    result = await global.botRuntime.requestBotPairingCode("subbot", {
+      number: phoneNumber,
+      requesterNumber: phoneNumber,
+      requesterJid: `panel:${requestToken}`,
+      useCache: true,
+    });
+  }
+
   const { callbackUrl, callbackToken } = resolvePanelCallbackConfig(payload);
   const panelPayload = mapRuntimePairingResultToPanelPayload(requestToken, result);
 
