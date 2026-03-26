@@ -18,6 +18,11 @@ const baseApp = {
   interpreter: "node",
   autorestart: true,
   watch: false,
+  min_uptime: "20s",
+  max_restarts: 25,
+  restart_delay: 4000,
+  exp_backoff_restart_delay: 200,
+  kill_timeout: 15000,
   max_memory_restart: "700M",
   env: {
     NODE_ENV: process.env.NODE_ENV || "production",

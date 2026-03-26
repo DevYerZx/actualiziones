@@ -70,6 +70,17 @@ const PANEL_SUBBOT_CALLBACK_WAIT_MS = 90_000;
 const PANEL_SUBBOT_CALLBACK_POLL_MS = 4_000;
 const SESSION_REPLACED_BLOCK_MS = 15 * 60 * 1000;
 const PROFILE_APPLY_DELAY_MS = 15 * 1000;
+const COMMAND_TIMEOUT_MS = 3 * 60 * 1000;
+const DOWNLOAD_COMMAND_TIMEOUT_MS = 12 * 60 * 1000;
+const HOOK_TIMEOUT_MS = 20 * 1000;
+const PAIRING_SOCKET_WAIT_MS = 15 * 1000;
+const PAIRING_REQUEST_TIMEOUT_MS = 25 * 1000;
+const BOT_HEALTHCHECK_INTERVAL_MS = 30 * 1000;
+const BOT_CONNECTING_STALE_MS = 2 * 60 * 1000;
+const BOT_PAIRING_STALE_MS = 2 * 60 * 1000;
+const BOT_DEGRADED_SOCKET_STALE_MS = 90 * 1000;
+const FATAL_ERROR_WINDOW_MS = 2 * 60 * 1000;
+const FATAL_ERROR_THRESHOLD = 3;
 const logger = pino({ level: "silent" });
 const FIXED_BROWSER = ["Windows", "Chrome", "114.0.5735.198"];
 
@@ -1384,6 +1395,7 @@ const usageStats = normalizeUsageStats(safeReadJson(USAGE_STATS_FILE, {}));
 let usageStatsSaveTimer = null;
 let managedBotSyncInterval = null;
 let autoCleanInterval = null;
+let botHealthCheckInterval = null;
 let dashboardServer = null;
 const WEB_BRIDGE_TOKEN = String(process.env.WEB_BRIDGE_TOKEN || "").trim();
 
@@ -1602,14 +1614,41 @@ console.error = (...args) => {
 
 // ================= ANTI CRASH =================
 
+const fatalRuntimeErrors = [];
+
+function recordFatalRuntimeError(kind, payload) {
+  const now = Date.now();
+  fatalRuntimeErrors.push(now);
+
+  while (
+    fatalRuntimeErrors.length &&
+    now - Number(fatalRuntimeErrors[0] || 0) > FATAL_ERROR_WINDOW_MS
+  ) {
+    fatalRuntimeErrors.shift();
+  }
+
+  if (fatalRuntimeErrors.length < FATAL_ERROR_THRESHOLD) {
+    return;
+  }
+
+  fatalRuntimeErrors.length = 0;
+  console.error(
+    `[FATAL_GUARD] Demasiados ${kind} en poco tiempo. Reiniciando proceso...`,
+    payload
+  );
+  scheduleProcessRestart(2000);
+}
+
 process.on("unhandledRejection", (reason) => {
   if (shouldIgnoreError(reason)) return;
   console.error(reason);
+  recordFatalRuntimeError("unhandledRejection", reason);
 });
 
 process.on("uncaughtException", (err) => {
   if (shouldIgnoreError(err?.message || err)) return;
   console.error(err);
+  recordFatalRuntimeError("uncaughtException", err);
 });
 
 // ================= HELPERS BOT =================
@@ -1646,6 +1685,237 @@ function createStoreForBot(botId) {
   return store;
 }
 
+function formatTimeoutSeconds(ms) {
+  const seconds = Math.max(1, Math.ceil(Number(ms || 0) / 1000));
+  return `${seconds}s`;
+}
+
+function buildTaskTimeoutError(label, timeoutMs) {
+  const error = new Error(
+    `${label} supero el tiempo limite (${formatTimeoutSeconds(timeoutMs)}).`
+  );
+  error.code = "TASK_TIMEOUT";
+  error.timeoutMs = Number(timeoutMs || 0);
+  return error;
+}
+
+function isTaskTimeoutError(error) {
+  return String(error?.code || "").trim().toUpperCase() === "TASK_TIMEOUT";
+}
+
+function runTaskWithTimeout(label, timeoutMs, task) {
+  const effectiveTimeout = Number(timeoutMs || 0);
+
+  if (!Number.isFinite(effectiveTimeout) || effectiveTimeout <= 0) {
+    return Promise.resolve().then(task);
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      settled = true;
+      reject(buildTaskTimeoutError(label, effectiveTimeout));
+    }, effectiveTimeout);
+
+    timer.unref?.();
+
+    Promise.resolve()
+      .then(task)
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        if (settled) {
+          console.error(`${label} termino con error despues del timeout:`, error);
+          return;
+        }
+
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+function markBotSocketActivity(botState, eventLabel = "") {
+  if (!botState) return;
+  botState.lastSocketEventAt = Date.now();
+  if (eventLabel) {
+    botState.lastSocketEvent = String(eventLabel || "").trim().slice(0, 120);
+  }
+}
+
+function markBotSendSuccess(botState) {
+  if (!botState) return;
+  botState.lastSendSuccessAt = Date.now();
+  botState.lastSendErrorAt = 0;
+  botState.lastSendError = "";
+}
+
+function markBotSendError(botState, error) {
+  if (!botState) return;
+  botState.lastSendErrorAt = Date.now();
+  botState.lastSendError = String(
+    error?.message || error || "error desconocido"
+  ).slice(0, 220);
+}
+
+function clearActiveCommandState(botState) {
+  if (!botState) return;
+  botState.activeCommandName = "";
+  botState.activeCommandStartedAt = 0;
+  botState.activeCommandTimeoutMs = 0;
+}
+
+function startCommandTracking(botState, commandName, timeoutMs) {
+  if (!botState) return;
+
+  const startedAt = Date.now();
+  const normalizedCommand = String(commandName || "").trim();
+
+  botState.lastCommandName = normalizedCommand;
+  botState.lastCommandStartedAt = startedAt;
+  botState.activeCommandName = normalizedCommand;
+  botState.activeCommandStartedAt = startedAt;
+  botState.activeCommandTimeoutMs = Number(timeoutMs || 0);
+}
+
+function finishCommandTracking(botState, commandName, status = "ok") {
+  if (!botState) return;
+
+  const finishedAt = Date.now();
+  const startedAt = Number(
+    botState.activeCommandStartedAt || botState.lastCommandStartedAt || 0
+  );
+
+  botState.lastCommandName =
+    String(commandName || botState.lastCommandName || "").trim();
+  botState.lastCommandFinishedAt = finishedAt;
+  botState.lastCommandStatus = String(status || "ok").trim() || "ok";
+  botState.lastCommandDurationMs = startedAt
+    ? Math.max(0, finishedAt - startedAt)
+    : 0;
+
+  if (status === "timeout") {
+    botState.lastCommandTimedOutAt = finishedAt;
+  }
+
+  clearActiveCommandState(botState);
+}
+
+function resolveCommandTimeout(cmd) {
+  const explicitTimeout = Number(cmd?.timeoutMs || 0);
+  if (Number.isFinite(explicitTimeout) && explicitTimeout > 0) {
+    return explicitTimeout;
+  }
+
+  return isDownloadCommand(cmd)
+    ? DOWNLOAD_COMMAND_TIMEOUT_MS
+    : COMMAND_TIMEOUT_MS;
+}
+
+function wrapSocketSendMessage(botState, sock) {
+  if (!sock || sock.__dvyerWrappedSendMessage) {
+    return sock;
+  }
+
+  const originalSendMessage =
+    typeof sock.sendMessage === "function" ? sock.sendMessage.bind(sock) : null;
+
+  if (!originalSendMessage) {
+    return sock;
+  }
+
+  sock.sendMessage = async (...args) => {
+    markBotSocketActivity(botState, "sendMessage");
+
+    try {
+      const result = await originalSendMessage(...args);
+      markBotSendSuccess(botState);
+      return result;
+    } catch (error) {
+      markBotSendError(botState, error);
+      throw error;
+    }
+  };
+
+  sock.__dvyerWrappedSendMessage = true;
+  return sock;
+}
+
+function hasPairingSocketProgress(botState, sock) {
+  if (!botState || !sock || botState.sock !== sock) {
+    return false;
+  }
+
+  const connectionState = String(botState.connectionState || "")
+    .trim()
+    .toLowerCase();
+  const lastEvent = String(botState.lastSocketEvent || "")
+    .trim()
+    .toLowerCase();
+
+  if (connectionState === "connecting" || connectionState === "open") {
+    return true;
+  }
+
+  return (
+    lastEvent === "connection.qr" ||
+    lastEvent === "connection.connecting" ||
+    lastEvent === "connection.open"
+  );
+}
+
+async function waitForPairingSocketProgress(
+  botState,
+  sock,
+  timeoutMs = PAIRING_SOCKET_WAIT_MS
+) {
+  const timeoutAt = Date.now() + Math.max(1000, Number(timeoutMs || 0));
+
+  while (Date.now() < timeoutAt) {
+    if (!botState || botState.sock !== sock) {
+      return false;
+    }
+
+    if (hasPairingSocketProgress(botState, sock)) {
+      return true;
+    }
+
+    await delay(250);
+  }
+
+  return hasPairingSocketProgress(botState, sock);
+}
+
+async function sendCommandTimeoutNotice(context, error) {
+  if (!context?.sock || !context?.from) return;
+
+  try {
+    const timeoutMs = Number(error?.timeoutMs || 0);
+    const commandName = String(
+      context.commandName || context.cmd?.name || "comando"
+    ).trim();
+
+    await context.sock.sendMessage(
+      context.from,
+      {
+        text:
+          `El comando *${commandName || "comando"}* tardo demasiado y fue detenido.\n` +
+          `Tiempo limite: *${formatTimeoutSeconds(timeoutMs)}*\n` +
+          `Puedes intentarlo otra vez en unos segundos.`,
+        ...global.channelInfo,
+      },
+      getQuoteOptions(context.msg)
+    );
+  } catch (notifyError) {
+    console.error("No pude avisar el timeout del comando:", notifyError);
+  }
+}
+
 function ensureBotState(config) {
   const existing = botStates.get(config.id);
   if (existing) {
@@ -1677,6 +1947,29 @@ function ensureBotState(config) {
     lastProfileAppliedAt: 0,
     profileApplyTimer: null,
     reconnectTimer: null,
+    bootStartedAt: 0,
+    connectionState: "",
+    lastDisconnectCode: 0,
+    lastSocketEventAt: 0,
+    lastSocketEvent: "",
+    lastMessageUpsertAt: 0,
+    lastIncomingMessageAt: 0,
+    lastSendSuccessAt: 0,
+    lastSendErrorAt: 0,
+    lastSendError: "",
+    lastPairingRequestAt: 0,
+    lastPairingRequestNumber: "",
+    lastPairingErrorAt: 0,
+    lastPairingError: "",
+    lastCommandName: "",
+    lastCommandStartedAt: 0,
+    lastCommandFinishedAt: 0,
+    lastCommandDurationMs: 0,
+    lastCommandStatus: "",
+    lastCommandTimedOutAt: 0,
+    activeCommandName: "",
+    activeCommandStartedAt: 0,
+    activeCommandTimeoutMs: 0,
     groupCache: new Map(),
     store: createStoreForBot(config.id),
     activeDownloadJobs: new Map(),
@@ -1865,6 +2158,7 @@ function releaseSubbotSlot(botState, options = {}) {
 
   clearReconnectTimer(botState);
   clearPairingResetTimer(botState);
+  clearProfileApplyTimer(botState);
 
   if (options?.closeSocket !== false) {
     try {
@@ -1891,11 +2185,19 @@ function releaseSubbotSlot(botState, options = {}) {
   botState.connecting = false;
   botState.connectedAt = 0;
   botState.lastDisconnectAt = releaseAt;
+  botState.lastDisconnectCode = 0;
   botState.pairingRequested = false;
   botState.pairingCommandHintShown = false;
   botState.lastPairingCode = "";
   botState.lastPairingNumber = "";
   botState.lastPairingAt = 0;
+  botState.lastPairingRequestAt = 0;
+  botState.lastPairingRequestNumber = "";
+  botState.lastPairingErrorAt = 0;
+  botState.lastPairingError = "";
+  botState.connectionState = "released";
+  botState.bootStartedAt = 0;
+  clearActiveCommandState(botState);
   botState.config = {
     ...botState.config,
     ...releasedConfig,
@@ -1907,6 +2209,7 @@ function releaseSubbotSlot(botState, options = {}) {
     releasedAt: releaseAt,
   };
   botState.groupCache?.clear?.();
+  botState.activeDownloadJobs?.clear?.();
 
   console.log(
     `${getBotTag(botState)} Slot liberado (${options?.reason || "sin motivo"})`
@@ -1966,14 +2269,23 @@ function resetMainBotSession(botState, options = {}) {
   botState.connecting = false;
   botState.connectedAt = 0;
   botState.lastDisconnectAt = resetAt;
+  botState.lastDisconnectCode = 0;
   botState.pairingRequested = false;
   botState.pairingCommandHintShown = false;
   botState.lastPairingCode = "";
   botState.lastPairingNumber = "";
   botState.lastPairingAt = 0;
+  botState.lastPairingRequestAt = 0;
+  botState.lastPairingRequestNumber = "";
+  botState.lastPairingErrorAt = 0;
+  botState.lastPairingError = "";
   botState.reconnectAttempts = 0;
   botState.lastProfileSignature = "";
+  botState.connectionState = "reset";
+  botState.bootStartedAt = 0;
+  clearActiveCommandState(botState);
   botState.groupCache?.clear?.();
+  botState.activeDownloadJobs?.clear?.();
   botState.config = {
     ...botState.config,
     ...buildMainBotConfig(settings),
@@ -2065,7 +2377,11 @@ async function runMessageHooks(botState, context) {
     if (typeof cmd?.onMessage !== "function") continue;
 
     try {
-      const blocked = await cmd.onMessage(context);
+      const blocked = await runTaskWithTimeout(
+        `${getBotTag(botState)} hook onMessage ${cmd?.name || "anonimo"}`,
+        HOOK_TIMEOUT_MS,
+        () => cmd.onMessage(context)
+      );
       if (blocked) return true;
     } catch (err) {
       console.error(`${getBotTag(botState)} Error onMessage:`, err);
@@ -2080,15 +2396,20 @@ async function runGroupUpdateHooks(botState, sock, update) {
     if (typeof cmd?.onGroupUpdate !== "function") continue;
 
     try {
-      await cmd.onGroupUpdate({
-        sock,
-        update,
-        settings,
-        comandos,
-        botId: botState.config.id,
-        botLabel: botState.config.label,
-        botName: botState.config.displayName,
-      });
+      await runTaskWithTimeout(
+        `${getBotTag(botState)} hook onGroupUpdate ${cmd?.name || "anonimo"}`,
+        HOOK_TIMEOUT_MS,
+        () =>
+          cmd.onGroupUpdate({
+            sock,
+            update,
+            settings,
+            comandos,
+            botId: botState.config.id,
+            botLabel: botState.config.label,
+            botName: botState.config.displayName,
+          })
+      );
     } catch (err) {
       console.error(`${getBotTag(botState)} Error onGroupUpdate:`, err);
     }
@@ -2100,15 +2421,20 @@ async function runMessageDeleteHooks(botState, sock, payload) {
     if (typeof cmd?.onMessageDelete !== "function") continue;
 
     try {
-      await cmd.onMessageDelete({
-        sock,
-        settings,
-        comandos,
-        botId: botState.config.id,
-        botLabel: botState.config.label,
-        botName: botState.config.displayName,
-        ...payload,
-      });
+      await runTaskWithTimeout(
+        `${getBotTag(botState)} hook onMessageDelete ${cmd?.name || "anonimo"}`,
+        HOOK_TIMEOUT_MS,
+        () =>
+          cmd.onMessageDelete({
+            sock,
+            settings,
+            comandos,
+            botId: botState.config.id,
+            botLabel: botState.config.label,
+            botName: botState.config.displayName,
+            ...payload,
+          })
+      );
     } catch (err) {
       console.error(`${getBotTag(botState)} Error onMessageDelete:`, err);
     }
@@ -2266,6 +2592,7 @@ function enqueueDownloadCommand(botState, cmd, commandContext) {
 
   const jobId = Number(botState.downloadQueueCounter || 0) + 1;
   botState.downloadQueueCounter = jobId;
+  const timeoutMs = resolveCommandTimeout(cmd);
 
   let resolveJob;
   let rejectJob;
@@ -2278,11 +2605,18 @@ function enqueueDownloadCommand(botState, cmd, commandContext) {
     id: jobId,
     commandName: commandContext?.commandName || cmd?.name || "descarga",
     startedAt: Date.now(),
+    timeoutMs,
   };
   botState.activeDownloadJobs.set(jobId, activeJob);
 
   Promise.resolve()
-    .then(() => cmd.run(commandContext))
+    .then(() =>
+      runTaskWithTimeout(
+        `${getBotTag(botState)} comando ${activeJob.commandName}`,
+        timeoutMs,
+        () => cmd.run(commandContext)
+      )
+    )
     .then((result) => {
       resolveJob(result);
     })
@@ -2672,10 +3006,13 @@ function scheduleReconnect(botState, ms = 2500) {
   }
 
   clearReconnectTimer(botState);
+  botState.connectionState = "reconnecting";
+  markBotSocketActivity(botState, "reconnecting");
   botState.reconnectTimer = setTimeout(() => {
     botState.reconnectTimer = null;
     iniciarInstanciaBot(botState.config);
   }, ms);
+  botState.reconnectTimer.unref?.();
 }
 
 function maskDashboardNumber(value = "") {
@@ -2703,6 +3040,7 @@ function sanitizeDashboardBotSummary(bot = {}) {
     requesterJid: "",
     configuredNumber: maskDashboardNumber(bot?.configuredNumber),
     requesterNumber: maskDashboardNumber(bot?.requesterNumber),
+    lastPairingRequestNumber: maskDashboardNumber(bot?.lastPairingRequestNumber),
     cachedPairingCode: "",
     cachedPairingNumber: "",
     cachedPairingExpiresInMs: 0,
@@ -3582,6 +3920,8 @@ function resetPairingCache(botState) {
   botState.lastPairingCode = "";
   botState.lastPairingNumber = "";
   botState.lastPairingAt = 0;
+  botState.lastPairingRequestAt = 0;
+  botState.lastPairingRequestNumber = "";
   writePersistedBotRuntimeState(botState);
 }
 
@@ -3591,6 +3931,8 @@ function cachePairingCode(botState, code, number) {
   botState.lastPairingCode = String(code || "");
   botState.lastPairingNumber = String(number || "");
   botState.lastPairingAt = Date.now();
+  botState.lastPairingErrorAt = 0;
+  botState.lastPairingError = "";
 
   botState.pairingResetTimer = setTimeout(() => {
     const shouldRelease =
@@ -3642,6 +3984,7 @@ function summarizeBotState(botState) {
   const requestedAt = normalizeTimestamp(config?.requestedAt);
   const connectedForMs =
     connected && botState?.connectedAt ? Math.max(0, Date.now() - botState.connectedAt) : 0;
+  const activeCommandStartedAt = Number(botState?.activeCommandStartedAt || 0);
 
   return {
     id: String(config.id || ""),
@@ -3656,6 +3999,7 @@ function summarizeBotState(botState) {
     hasSocket: Boolean(botState?.sock),
     connectedAt: Number(botState?.connectedAt || 0),
     lastDisconnectAt: Number(botState?.lastDisconnectAt || 0),
+    lastDisconnectCode: Number(botState?.lastDisconnectCode || 0),
     configuredNumber,
     requesterNumber,
     requesterJid: String(config?.requesterJid || ""),
@@ -3664,6 +4008,31 @@ function summarizeBotState(botState) {
     connectedForMs,
     hasConfiguredNumber: Boolean(configuredNumber),
     pairingPending: Boolean(botState?.pairingRequested),
+    connectionState: String(botState?.connectionState || ""),
+    bootStartedAt: Number(botState?.bootStartedAt || 0),
+    lastSocketEventAt: Number(botState?.lastSocketEventAt || 0),
+    lastSocketEvent: String(botState?.lastSocketEvent || ""),
+    lastMessageUpsertAt: Number(botState?.lastMessageUpsertAt || 0),
+    lastIncomingMessageAt: Number(botState?.lastIncomingMessageAt || 0),
+    lastSendSuccessAt: Number(botState?.lastSendSuccessAt || 0),
+    lastSendErrorAt: Number(botState?.lastSendErrorAt || 0),
+    lastSendError: String(botState?.lastSendError || ""),
+    lastPairingRequestAt: Number(botState?.lastPairingRequestAt || 0),
+    lastPairingRequestNumber: String(botState?.lastPairingRequestNumber || ""),
+    lastPairingErrorAt: Number(botState?.lastPairingErrorAt || 0),
+    lastPairingError: String(botState?.lastPairingError || ""),
+    lastCommandName: String(botState?.lastCommandName || ""),
+    lastCommandStartedAt: Number(botState?.lastCommandStartedAt || 0),
+    lastCommandFinishedAt: Number(botState?.lastCommandFinishedAt || 0),
+    lastCommandDurationMs: Number(botState?.lastCommandDurationMs || 0),
+    lastCommandStatus: String(botState?.lastCommandStatus || ""),
+    lastCommandTimedOutAt: Number(botState?.lastCommandTimedOutAt || 0),
+    activeCommandName: String(botState?.activeCommandName || ""),
+    activeCommandStartedAt,
+    activeCommandTimeoutMs: Number(botState?.activeCommandTimeoutMs || 0),
+    activeCommandRunningForMs: activeCommandStartedAt
+      ? Math.max(0, Date.now() - activeCommandStartedAt)
+      : 0,
     replacementBlocked: Boolean(botState?.replacementBlocked),
     replacementBlockedAt: Number(botState?.replacementBlockedAt || 0),
     replacementBlockedUntil: Number(botState?.replacementBlockedUntil || 0),
@@ -3719,6 +4088,30 @@ function summarizeBotConfig(config) {
       hasConfiguredNumber: Boolean(
         sanitizePhoneNumber(config?.pairingNumber) || persistedState.configuredNumber
       ),
+      connectionState: String(persistedState.connectionState || ""),
+      bootStartedAt: Number(persistedState.bootStartedAt || 0),
+      lastSocketEventAt: Number(persistedState.lastSocketEventAt || 0),
+      lastSocketEvent: String(persistedState.lastSocketEvent || ""),
+      lastMessageUpsertAt: Number(persistedState.lastMessageUpsertAt || 0),
+      lastIncomingMessageAt: Number(persistedState.lastIncomingMessageAt || 0),
+      lastSendSuccessAt: Number(persistedState.lastSendSuccessAt || 0),
+      lastSendErrorAt: Number(persistedState.lastSendErrorAt || 0),
+      lastSendError: String(persistedState.lastSendError || ""),
+      lastPairingRequestAt: Number(persistedState.lastPairingRequestAt || 0),
+      lastPairingRequestNumber: String(persistedState.lastPairingRequestNumber || ""),
+      lastPairingErrorAt: Number(persistedState.lastPairingErrorAt || 0),
+      lastPairingError: String(persistedState.lastPairingError || ""),
+      lastCommandName: String(persistedState.lastCommandName || ""),
+      lastCommandStartedAt: Number(persistedState.lastCommandStartedAt || 0),
+      lastCommandFinishedAt: Number(persistedState.lastCommandFinishedAt || 0),
+      lastCommandDurationMs: Number(persistedState.lastCommandDurationMs || 0),
+      lastCommandStatus: String(persistedState.lastCommandStatus || ""),
+      lastCommandTimedOutAt: Number(persistedState.lastCommandTimedOutAt || 0),
+      activeCommandName: String(persistedState.activeCommandName || ""),
+      activeCommandStartedAt: Number(persistedState.activeCommandStartedAt || 0),
+      activeCommandTimeoutMs: Number(persistedState.activeCommandTimeoutMs || 0),
+      activeCommandRunningForMs: Number(persistedState.activeCommandRunningForMs || 0),
+      lastDisconnectCode: Number(persistedState.lastDisconnectCode || 0),
     };
   }
 
@@ -3739,6 +4132,7 @@ function summarizeBotConfig(config) {
     hasSocket: false,
     connectedAt: 0,
     lastDisconnectAt: 0,
+    lastDisconnectCode: 0,
     configuredNumber,
     requesterNumber,
     requesterJid: String(config?.requesterJid || ""),
@@ -3747,6 +4141,29 @@ function summarizeBotConfig(config) {
     connectedForMs: 0,
     hasConfiguredNumber: Boolean(configuredNumber),
     pairingPending: false,
+    connectionState: "",
+    bootStartedAt: 0,
+    lastSocketEventAt: 0,
+    lastSocketEvent: "",
+    lastMessageUpsertAt: 0,
+    lastIncomingMessageAt: 0,
+    lastSendSuccessAt: 0,
+    lastSendErrorAt: 0,
+    lastSendError: "",
+    lastPairingRequestAt: 0,
+    lastPairingRequestNumber: "",
+    lastPairingErrorAt: 0,
+    lastPairingError: "",
+    lastCommandName: "",
+    lastCommandStartedAt: 0,
+    lastCommandFinishedAt: 0,
+    lastCommandDurationMs: 0,
+    lastCommandStatus: "",
+    lastCommandTimedOutAt: 0,
+    activeCommandName: "",
+    activeCommandStartedAt: 0,
+    activeCommandTimeoutMs: 0,
+    activeCommandRunningForMs: 0,
     cachedPairingCode: "",
     cachedPairingNumber: "",
     cachedPairingExpiresInMs: 0,
@@ -3935,12 +4352,130 @@ function stopLocalManagedBot(botState, reason = "disabled") {
   } catch {}
 
   botState.sock = null;
+  botState.authState = null;
   botState.connecting = false;
   botState.lastDisconnectAt = Date.now();
+  botState.lastDisconnectCode = 0;
   botState.connectedAt = 0;
+  botState.connectionState = `stopped:${String(reason || "disabled").slice(0, 40)}`;
+  botState.bootStartedAt = 0;
+  clearActiveCommandState(botState);
   botState.groupCache?.clear?.();
+  botState.activeDownloadJobs?.clear?.();
   console.log(`${getBotTag(botState)} Detenido localmente (${reason})`);
   writePersistedBotRuntimeState(botState);
+}
+
+function recycleBotInstance(botState, reason = "recovery") {
+  if (!botState) return false;
+
+  clearReconnectTimer(botState);
+  clearPairingResetTimer(botState);
+  clearProfileApplyTimer(botState);
+
+  try {
+    botState.sock?.end?.();
+  } catch {}
+
+  botState.sock = null;
+  botState.authState = null;
+  botState.connecting = false;
+  botState.connectedAt = 0;
+  botState.lastDisconnectAt = Date.now();
+  botState.lastDisconnectCode = 0;
+  botState.connectionState = `recovery:${String(reason || "unknown").slice(0, 48)}`;
+  botState.bootStartedAt = 0;
+  botState.groupCache?.clear?.();
+  clearActiveCommandState(botState);
+  botState.activeDownloadJobs?.clear?.();
+  resetPairingCache(botState);
+  console.log(`${getBotTag(botState)} Reciclado automaticamente (${reason})`);
+  writePersistedBotRuntimeState(botState);
+  return true;
+}
+
+function runBotHealthChecks() {
+  const now = Date.now();
+
+  for (const botState of botStates.values()) {
+    if (!botState?.config?.id) {
+      continue;
+    }
+
+    if (isReplacementBlocked(botState)) {
+      continue;
+    }
+
+    const connectionState = String(botState.connectionState || "")
+      .trim()
+      .toLowerCase();
+    const socketReadyState = Number(botState.sock?.ws?.readyState);
+    const lastSocketEventAt = Number(
+      botState.lastSocketEventAt || botState.bootStartedAt || 0
+    );
+    const shouldBeRunning = shouldManagedProcessStartBot(botState.config);
+    const staleBoot =
+      Boolean(botState.sock) &&
+      !botState.connectedAt &&
+      ["", "booting", "connecting"].includes(connectionState) &&
+      lastSocketEventAt > 0 &&
+      now - lastSocketEventAt >= BOT_CONNECTING_STALE_MS;
+
+    if (staleBoot) {
+      recycleBotInstance(botState, "conexion_atascada");
+
+      if (shouldBeRunning) {
+        scheduleReconnect(botState, getReconnectDelay(botState, false));
+      }
+      continue;
+    }
+
+    const websocketBroken =
+      Boolean(botState.sock) &&
+      !botState.reconnectTimer &&
+      Number.isFinite(socketReadyState) &&
+      socketReadyState >= 2;
+
+    if (websocketBroken) {
+      recycleBotInstance(botState, "socket_ws_cerrado");
+
+      if (shouldBeRunning) {
+        scheduleReconnect(botState, getReconnectDelay(botState, false));
+      }
+      continue;
+    }
+
+    const pairingStuck =
+      Boolean(botState.pairingRequested) &&
+      !botState.lastPairingCode &&
+      Number(botState.lastPairingRequestAt || 0) > 0 &&
+      now - Number(botState.lastPairingRequestAt || 0) >= BOT_PAIRING_STALE_MS;
+
+    if (pairingStuck) {
+      recycleBotInstance(botState, "pairing_atascado");
+
+      if (shouldBeRunning) {
+        scheduleReconnect(botState, 4000);
+      }
+      continue;
+    }
+
+    const degradedSocket =
+      Boolean(botState.sock) &&
+      !botState.connectedAt &&
+      !botState.reconnectTimer &&
+      !["", "booting", "connecting", "open"].includes(connectionState) &&
+      lastSocketEventAt > 0 &&
+      now - lastSocketEventAt >= BOT_DEGRADED_SOCKET_STALE_MS;
+
+    if (degradedSocket) {
+      recycleBotInstance(botState, "socket_degradado");
+
+      if (shouldBeRunning) {
+        scheduleReconnect(botState, getReconnectDelay(botState, false));
+      }
+    }
+  }
 }
 
 function syncSettingsFromDisk() {
@@ -3976,7 +4511,7 @@ async function syncManagedProcessBots() {
       continue;
     }
 
-    if (!botState.sock && !botState.connecting) {
+    if (!botState.sock && !botState.connecting && !botState.reconnectTimer) {
       await iniciarInstanciaBot(botState.config);
     }
 
@@ -4127,14 +4662,27 @@ async function requestPairingCode(botState, options = {}) {
   botState.config.pairingNumber = resolvedNumber;
   botState.pairingRequested = true;
   botState.pairingCommandHintShown = false;
+  botState.lastPairingRequestAt = Date.now();
+  botState.lastPairingRequestNumber = resolvedNumber;
+  botState.lastPairingErrorAt = 0;
+  botState.lastPairingError = "";
 
   try {
-    console.log(
-      `${getBotTag(botState)} Esperando 5 segundos para pedir el pairing code...`
-    );
-    await delay(5000);
+    const socketReady = await waitForPairingSocketProgress(botState, sock);
+    if (!socketReady) {
+      console.warn(
+        `${getBotTag(botState)} El socket no avanzo a tiempo para pairing. Intentare igual.`
+      );
+      await delay(1500);
+    } else {
+      await delay(1200);
+    }
 
-    const code = await sock.requestPairingCode(resolvedNumber);
+    const code = await runTaskWithTimeout(
+      `${getBotTag(botState)} pairing code`,
+      PAIRING_REQUEST_TIMEOUT_MS,
+      () => sock.requestPairingCode(resolvedNumber)
+    );
     cachePairingCode(botState, code, resolvedNumber);
 
     return {
@@ -4149,6 +4697,10 @@ async function requestPairingCode(botState, options = {}) {
       expiresInMs: PAIRING_CODE_CACHE_MS,
     };
   } catch (err) {
+    botState.lastPairingErrorAt = Date.now();
+    botState.lastPairingError = String(
+      err?.message || err || "No pude obtener el codigo de vinculacion."
+    ).slice(0, 220);
     resetPairingCache(botState);
     return {
       ok: false,
@@ -4531,6 +5083,7 @@ global.botRuntime = {
 async function handleIncomingMessages(botState, sock, messages) {
   for (const raw of messages || []) {
     let failedCommandName = "";
+    let activeCommandContext = null;
 
     try {
       if (!raw?.message) continue;
@@ -4550,6 +5103,8 @@ async function handleIncomingMessages(botState, sock, messages) {
 
       totalMensajes++;
       trackMessageUsage(botState, m);
+      botState.lastIncomingMessageAt = Date.now();
+      markBotSocketActivity(botState, "incoming_message");
 
       const tipo = tipoChat(from);
       mensajesPorTipo[tipo] = (mensajesPorTipo[tipo] || 0) + 1;
@@ -4597,6 +5152,7 @@ async function handleIncomingMessages(botState, sock, messages) {
         usedPrefix: commandData.prefix,
         commandName: commandData.commandName,
       };
+      activeCommandContext = commandContext;
 
       const allowed = await canRunCommand(cmd, commandContext);
       if (!allowed) continue;
@@ -4611,18 +5167,36 @@ async function handleIncomingMessages(botState, sock, messages) {
         runningJob.promise.then(() => {
           recordCommandSuccess(commandData.commandName);
         });
-        runningJob.promise.catch((err) => {
+        runningJob.promise.catch(async (err) => {
           recordCommandFailure(commandData.commandName, err);
+          if (isTaskTimeoutError(err)) {
+            await sendCommandTimeoutNotice(commandContext, err);
+          }
           console.error(`${getBotTag(botState)} Error comando concurrente:`, err);
         });
         continue;
       }
 
-      await cmd.run(commandContext);
+      const timeoutMs = resolveCommandTimeout(cmd);
+      startCommandTracking(botState, commandData.commandName, timeoutMs);
+      await runTaskWithTimeout(
+        `${getBotTag(botState)} comando ${commandData.commandName}`,
+        timeoutMs,
+        () => cmd.run(commandContext)
+      );
+      finishCommandTracking(botState, commandData.commandName, "ok");
       recordCommandSuccess(commandData.commandName);
     } catch (err) {
       if (failedCommandName) {
+        finishCommandTracking(
+          botState,
+          failedCommandName,
+          isTaskTimeoutError(err) ? "timeout" : "error"
+        );
         recordCommandFailure(failedCommandName, err);
+      }
+      if (activeCommandContext && isTaskTimeoutError(err)) {
+        await sendCommandTimeoutNotice(activeCommandContext, err);
       }
       console.error(`${getBotTag(botState)} Error comando:`, err);
     }
@@ -4635,6 +5209,9 @@ async function iniciarInstanciaBot(config) {
   const botState = ensureBotState(config);
   if (botState.connecting) return;
   botState.connecting = true;
+  botState.bootStartedAt = Date.now();
+  botState.connectionState = "booting";
+  markBotSocketActivity(botState, "booting");
 
   try {
     const { state: authState, saveCreds } = await useMultiFileAuthState(
@@ -4667,14 +5244,18 @@ async function iniciarInstanciaBot(config) {
       cachedGroupMetadata: async (jid) => cachedGroupMetadata(botState, jid),
     });
 
-    botState.sock = sock;
+    botState.sock = wrapSocketSendMessage(botState, sock);
     botState.authState = authState;
+    markBotSocketActivity(botState, "socket_created");
 
     if (botState.store?.bind) {
-      botState.store.bind(sock.ev);
+      botState.store.bind(botState.sock.ev);
     }
 
-    sock.ev.on("creds.update", saveCreds);
+    botState.sock.ev.on("creds.update", (...args) => {
+      markBotSocketActivity(botState, "creds.update");
+      return saveCreds(...args);
+    });
 
     const syncEconomyContact = (entry = {}) => {
       if (!entry?.id) return;
@@ -4685,7 +5266,8 @@ async function iniciarInstanciaBot(config) {
       });
     };
 
-    sock.ev.on("contacts.update", (updates = []) => {
+    botState.sock.ev.on("contacts.update", (updates = []) => {
+      markBotSocketActivity(botState, "contacts.update");
       for (const update of updates || []) {
         try {
           syncEconomyContact(update);
@@ -4693,7 +5275,8 @@ async function iniciarInstanciaBot(config) {
       }
     });
 
-    sock.ev.on("contacts.upsert", (updates = []) => {
+    botState.sock.ev.on("contacts.upsert", (updates = []) => {
+      markBotSocketActivity(botState, "contacts.upsert");
       for (const update of updates || []) {
         try {
           syncEconomyContact(update);
@@ -4701,7 +5284,8 @@ async function iniciarInstanciaBot(config) {
       }
     });
 
-    sock.ev.on("chats.phoneNumberShare", (payload = {}) => {
+    botState.sock.ev.on("chats.phoneNumberShare", (payload = {}) => {
+      markBotSocketActivity(botState, "chats.phoneNumberShare");
       try {
         if (!payload?.lid || !payload?.jid) return;
         touchEconomyProfile(payload.lid, settings, {
@@ -4712,29 +5296,39 @@ async function iniciarInstanciaBot(config) {
       } catch {}
     });
 
-    sock.ev.on("groups.update", async (updates) => {
+    botState.sock.ev.on("groups.update", async (updates) => {
+      markBotSocketActivity(botState, "groups.update");
       for (const update of updates || []) {
         try {
           if (!update?.id) continue;
-          const meta = await sock.groupMetadata(update.id);
+          const meta = await botState.sock.groupMetadata(update.id);
           botState.groupCache.set(update.id, meta);
         } catch {}
       }
     });
 
-    sock.ev.on("group-participants.update", async (update) => {
+    botState.sock.ev.on("group-participants.update", async (update) => {
+      markBotSocketActivity(botState, "group-participants.update");
       if (update?.id) {
         try {
-          const meta = await sock.groupMetadata(update.id);
+          const meta = await botState.sock.groupMetadata(update.id);
           botState.groupCache.set(update.id, meta);
         } catch {}
       }
 
-      await runGroupUpdateHooks(botState, sock, update);
+      await runGroupUpdateHooks(botState, botState.sock, update);
     });
 
-    sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
+    botState.sock.ev.on("connection.update", async ({ connection, lastDisconnect, qr }) => {
       try {
+        botState.connectionState = String(connection || botState.connectionState || "")
+          .trim()
+          .toLowerCase();
+        markBotSocketActivity(
+          botState,
+          qr ? "connection.qr" : `connection.${botState.connectionState || "update"}`
+        );
+
         if (
           qr &&
           shouldAutoRequestPairingCode(botState) &&
@@ -4758,9 +5352,11 @@ async function iniciarInstanciaBot(config) {
           botState.reconnectAttempts = 0;
           botState.connectedAt = Date.now();
           botState.lastDisconnectAt = 0;
+          botState.lastDisconnectCode = 0;
+          botState.connectionState = "open";
           resetPairingCache(botState);
           botState.pairingCommandHintShown = false;
-          scheduleProfileApply(botState, sock);
+          scheduleProfileApply(botState, botState.sock);
           console.log(
             chalk.green(
               `${getBotTag(botState)} Ya conectado bot ${resolveConfiguredBotName(config)}`
@@ -4779,6 +5375,7 @@ async function iniciarInstanciaBot(config) {
             lastDisconnect?.error?.data?.statusCode ||
             0;
 
+          markBotSocketActivity(botState, `connection.close:${code || "unknown"}`);
           console.log(`${getBotTag(botState)} Conexion cerrada:`, code);
 
           const loggedOut =
@@ -4792,6 +5389,8 @@ async function iniciarInstanciaBot(config) {
 
           botState.sock = null;
           botState.lastDisconnectAt = Date.now();
+          botState.lastDisconnectCode = Number(code || 0);
+          botState.connectionState = "close";
           clearProfileApplyTimer(botState);
           resetPairingCache(botState);
           writePersistedBotRuntimeState(botState);
@@ -4828,7 +5427,10 @@ async function iniciarInstanciaBot(config) {
       }
     });
 
-    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+    botState.sock.ev.on("messages.upsert", async ({ messages, type }) => {
+      botState.lastMessageUpsertAt = Date.now();
+      markBotSocketActivity(botState, `messages.upsert:${type || "unknown"}`);
+
       if (type && type !== "notify" && type !== "append") {
         return;
       }
@@ -4848,10 +5450,11 @@ async function iniciarInstanciaBot(config) {
       });
 
       if (!filteredMessages.length) return;
-      await handleIncomingMessages(botState, sock, filteredMessages);
+      await handleIncomingMessages(botState, botState.sock, filteredMessages);
     });
 
-    sock.ev.on("messages.delete", async (update) => {
+    botState.sock.ev.on("messages.delete", async (update) => {
+      markBotSocketActivity(botState, "messages.delete");
       const keys = Array.isArray(update?.keys) ? update.keys : [];
 
       for (const key of keys) {
@@ -4874,7 +5477,7 @@ async function iniciarInstanciaBot(config) {
             }
           } catch {}
 
-          await runMessageDeleteHooks(botState, sock, {
+          await runMessageDeleteHooks(botState, botState.sock, {
             update,
             deleteKey: key,
             from: remoteJid,
@@ -4887,7 +5490,12 @@ async function iniciarInstanciaBot(config) {
       }
     });
   } catch (err) {
+    botState.connectionState = "start_error";
+    botState.lastDisconnectAt = Date.now();
+    botState.lastSocketEventAt = Date.now();
+    botState.lastSocketEvent = "start_error";
     console.error(`${getBotTag(config)} Error iniciando bot:`, err);
+    writePersistedBotRuntimeState(botState);
   } finally {
     botState.connecting = false;
   }
@@ -4928,6 +5536,17 @@ async function start() {
     }, Math.max(60_000, Number(getAutoCleanState().intervalMs || 30 * 60 * 1000)));
     autoCleanInterval.unref?.();
   }
+
+  if (!botHealthCheckInterval) {
+    botHealthCheckInterval = setInterval(() => {
+      try {
+        runBotHealthChecks();
+      } catch (err) {
+        console.error("Error en bot healthcheck:", err);
+      }
+    }, BOT_HEALTHCHECK_INTERVAL_MS);
+    botHealthCheckInterval.unref?.();
+  }
 }
 
 start();
@@ -4945,6 +5564,10 @@ process.on("SIGINT", () => {
     if (autoCleanInterval) {
       clearInterval(autoCleanInterval);
       autoCleanInterval = null;
+    }
+    if (botHealthCheckInterval) {
+      clearInterval(botHealthCheckInterval);
+      botHealthCheckInterval = null;
     }
     fs.writeFileSync(USAGE_STATS_FILE, JSON.stringify(usageStats, null, 2));
   } catch {}
