@@ -416,13 +416,3 @@ Comandos relacionados:
 
 ## Recomendaciones
 
-- no subas sesiones de WhatsApp al repositorio
-- no compartas tokens ni claves dentro del codigo
-- usa PM2 si tu bot va a estar 24/7
-- usa disco persistente si despliegas en hosting
-- manten `ffmpeg` instalado para comandos multimedia
-- haz backups periodicos de `settings/`, `database/` y sesiones
-
----
-
-Si quieres, el siguiente paso puede ser que tambien te deje un README con seccion de comandos principales, capturas y formato mas tipo landing para GitHub.
