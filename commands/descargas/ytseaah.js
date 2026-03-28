@@ -1,3 +1,4 @@
+
 import yts from 'yt-search'
 
 export default {
@@ -19,12 +20,6 @@ export default {
         )
       }
 
-      await conn.sendMessage(
-        from,
-        { text: '🔎 Buscando en YouTube...' },
-        { quoted: m }
-      )
-
       const search = await yts(query)
       const videos = Array.isArray(search?.videos) ? search.videos.slice(0, 10) : []
 
@@ -36,58 +31,38 @@ export default {
         )
       }
 
-      const sections = [
+      const rows = videos.map((video, index) => ({
+        title: `${index + 1}. ${video.title}`.slice(0, 72),
+        description: `👤 ${video.author?.name || 'Desconocido'} | ⏱️ ${video.timestamp || '??:??'}`.slice(0, 72),
+        rowId: `.play ${video.url}`
+      }))
+
+      return await conn.sendMessage(
+        from,
         {
-          title: 'Opciones disponibles',
-          rows: videos.map((video, index) => ({
-            title: `${index + 1}. ${video.title}`.slice(0, 72),
-            description: `👤 ${video.author?.name || 'Desconocido'} | ⏱️ ${video.timestamp || '??:??'}`.slice(0, 72),
-            rowId: `.play ${video.url}`
-          }))
-        }
-      ]
+          text: '🎵 Resultados de búsqueda\nSelecciona una opción',
+          footer: 'ミ★ 𝘌𝘯𝘪𝘨𝘮𝘢-𝘉𝘰𝘵 ★彡',
+          title: 'Resultados de YouTube',
+          sections: [
+            {
+              title: 'Opciones disponibles',
+              rows
+            }
+          ],
+          buttonText: 'Ver opciones'
+        },
+        { quoted: m }
+      )
+    } catch (err) {
+      console.error('Error en ysearch:', err)
 
       try {
         return await conn.sendMessage(
           from,
-          {
-            text: '🎵 Resultados de búsqueda\nSelecciona una opción',
-            footer: 'ミ★ 𝘌𝘯𝘪𝘨𝘮𝘢-𝘉𝘰𝘵 ★彡',
-            title: 'Resultados de YouTube',
-            buttonText: 'Ver opciones',
-            sections
-          },
+          { text: `Error en ysearch:\n${err?.message || err}` },
           { quoted: m }
         )
-      } catch (listError) {
-        console.error('La lista interactiva falló, mando texto normal:', listError)
-
-        let txt = `🎵 *RESULTADOS DE BÚSQUEDA*\n\n`
-        txt += `🔎 *Texto:* ${query}\n\n`
-
-        for (let i = 0; i < videos.length; i++) {
-          const v = videos[i]
-          txt += `*${i + 1}.* ${v.title}\n`
-          txt += `👤 ${v.author?.name || 'Desconocido'}\n`
-          txt += `⏱️ ${v.timestamp || '??:??'}\n`
-          txt += `🔗 ${v.url}\n`
-          txt += `📥 Usa: .play ${v.url}\n\n`
-        }
-
-        return await conn.sendMessage(
-          from,
-          { text: txt },
-          { quoted: m }
-        )
-      }
-    } catch (err) {
-      console.error('Error en ysearch:', err)
-
-      return await conn.sendMessage(
-        from,
-        { text: `Ocurrió un error en ysearch:\n${err?.message || err}` },
-        { quoted: m }
-      )
+      } catch {}
     }
   }
 }
