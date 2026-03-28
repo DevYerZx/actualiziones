@@ -1,4 +1,3 @@
-
 import yts from 'yt-search'
 
 export default {
@@ -7,10 +6,10 @@ export default {
   category: 'busqueda',
 
   async run(ctx) {
-    const { sock: conn, m, text, from } = ctx
+    const { sock: conn, m, from, args } = ctx
 
     try {
-      const query = String(text || '').trim()
+      const query = Array.isArray(args) ? args.join(' ').trim() : ''
 
       if (!query) {
         return await conn.sendMessage(
