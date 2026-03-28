@@ -1,3 +1,4 @@
+
 import yts from 'yt-search'
 
 export default {
@@ -30,44 +31,26 @@ export default {
         )
       }
 
-      const listSections = [
+      const sections = [
         {
           title: 'Opciones disponibles',
           rows: videos.map((video, index) => ({
             title: `${index + 1}. ${video.title}`.slice(0, 72),
-            description: `⏱️ ${video.timestamp || '??:??'} | 👤 ${video.author?.name || 'Desconocido'}`.slice(0, 72),
+            description: `👤 ${video.author?.name || 'Desconocido'} | ⏱️ ${video.timestamp || '??:??'}`.slice(0, 72),
             rowId: `.play ${video.url}`
           }))
         }
       ]
 
-      if (typeof conn.sendList === 'function') {
-        return await conn.sendList(
-          from,
-          '🎵 Resultados de búsqueda\nSelecciona una opción',
-          'ミ★ 𝘌𝘯𝘪𝘨𝘮𝘢-𝘉𝘰𝘵 ★彡',
-          'Resultados de YouTube',
-          'Ver opciones',
-          listSections,
-          m
-        )
-      }
-
-      let txt = `🎵 *RESULTADOS DE BÚSQUEDA*\n\n`
-      txt += `🔎 *Texto:* ${query}\n\n`
-
-      for (let i = 0; i < videos.length; i++) {
-        const v = videos[i]
-        txt += `*${i + 1}.* ${v.title}\n`
-        txt += `⏱️ ${v.timestamp || '??:??'}\n`
-        txt += `👤 ${v.author?.name || 'Desconocido'}\n`
-        txt += `🔗 ${v.url}\n`
-        txt += `📥 Usa: .play ${v.url}\n\n`
-      }
-
       return await conn.sendMessage(
         from,
-        { text: txt },
+        {
+          text: '🎵 Resultados de búsqueda\nSelecciona una opción',
+          footer: 'ミ★ 𝘌𝘯𝘪𝘨𝘮𝘢-𝘉𝘰𝘵 ★彡',
+          title: 'Resultados de YouTube',
+          buttonText: 'Ver opciones',
+          sections
+        },
         { quoted: m }
       )
     } catch (err) {
