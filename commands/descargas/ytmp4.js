@@ -1,43 +1,17 @@
-import fs from "fs";
-import path from "path";
-import axios from "axios";
-import { pipeline } from "stream/promises";
-import { spawn } from "child_process";
 import { buildDvyerUrl, getDvyerBaseUrl } from "../../lib/api-manager.js";
-import { bindAbort, buildAbortError, throwIfAborted } from "../../lib/command-abort.js";
 import { getDownloadCache, setDownloadCache, withInflightDedup } from "../../lib/download-cache.js";
 import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
 const API_VIDEO_PATH = "/ytdlmp4";
-const API_VIDEO_LEGACY_PATH = "/ytmp4";
-const API_VIDEO_ALT_PATH = "/ytaltmp4";
 const API_SEARCH_PATH = "/ytsearch";
 const API_BASE = getDvyerBaseUrl();
 const API_VIDEO_URL = buildDvyerUrl(API_VIDEO_PATH);
-const API_VIDEO_LEGACY_URL = buildDvyerUrl(API_VIDEO_LEGACY_PATH);
-const API_VIDEO_ALT_URL = buildDvyerUrl(API_VIDEO_ALT_PATH);
 const API_SEARCH_URL = buildDvyerUrl(API_SEARCH_PATH);
 
-const COOLDOWN_TIME = 15 * 1000;
 const VIDEO_QUALITY = "360p";
-const REQUEST_TIMEOUT = 120000;
-const MAX_VIDEO_BYTES = 1500 * 1024 * 1024;
-const VIDEO_AS_DOCUMENT_THRESHOLD = 70 * 1024 * 1024;
-const TMP_DIR = path.join(process.cwd(), "tmp");
+const COOLDOWN_TIME = 8 * 1000;
 
 const cooldowns = new Map();
-
-if (!fs.existsSync(TMP_DIR)) {
-  fs.mkdirSync(TMP_DIR, { recursive: true });
-}
-
-function deleteFileSafe(filePath) {
-  try {
-    if (filePath && fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-    }
-  } catch {}
-}
 
 function safeFileName(name) {
   return (
@@ -49,17 +23,43 @@ function safeFileName(name) {
   );
 }
 
-function normalizeMp4Name(name) {
-  const clean = safeFileName(String(name || "video").replace(/\.mp4$/i, ""));
-  return `${clean || "video"}.mp4`;
-}
-
-function stripExtension(name) {
-  return String(name || "").replace(/\.[^.]+$/i, "");
-}
-
 function isHttpUrl(value) {
   return /^https?:\/\//i.test(String(value || ""));
+}
+
+function extractYouTubeUrl(text) {
+  const match = String(text || "").match(
+    /https?:\/\/(?:www\.)?(?:youtube\.com|music\.youtube\.com|youtu\.be)\/[^\s]+/i
+  );
+  return match ? match[0].trim() : "";
+}
+
+function normalizeYouTubeUrl(input) {
+  try {
+    const raw = String(input || "").trim();
+    if (!raw) return "";
+
+    const url = new URL(raw);
+    const host = url.hostname.toLowerCase();
+
+    if (host === "youtu.be") {
+      const id = url.pathname.replace("/", "").trim();
+      return id ? `https://www.youtube.com/watch?v=${id}` : "";
+    }
+
+    if (
+      host === "youtube.com" ||
+      host === "www.youtube.com" ||
+      host === "music.youtube.com"
+    ) {
+      const id = url.searchParams.get("v");
+      return id ? `https://www.youtube.com/watch?v=${id}` : "";
+    }
+
+    return "";
+  } catch {
+    return "";
+  }
 }
 
 function normalizeApiUrl(url) {
@@ -84,13 +84,6 @@ function pickApiDownloadUrl(data) {
     data?.result?.url ||
     ""
   );
-}
-
-function extractYouTubeUrl(text) {
-  const match = String(text || "").match(
-    /https?:\/\/(?:www\.)?(?:youtube\.com|music\.youtube\.com|youtu\.be)\/[^\s]+/i
-  );
-  return match ? match[0].trim() : "";
 }
 
 function extractTextFromMessage(message) {
@@ -126,7 +119,6 @@ function resolveUserInput(ctx) {
   const argsText = Array.isArray(ctx.args) ? ctx.args.join(" ").trim() : "";
   const quotedMessage = getQuotedMessage(ctx, msg);
   const quotedText = extractTextFromMessage(quotedMessage);
-
   return argsText || quotedText || "";
 }
 
@@ -143,42 +135,18 @@ function extractApiError(data, status) {
   );
 }
 
-function parseContentDispositionFileName(headerValue) {
-  const text = String(headerValue || "");
-  const utfMatch = text.match(/filename\*=UTF-8''([^;]+)/i);
+async function apiGetJson(url, params, timeout = 45000) {
+  const axios = (await import("axios")).default;
 
-  if (utfMatch?.[1]) {
-    try {
-      return decodeURIComponent(utfMatch[1]).replace(/["']/g, "").trim();
-    } catch {}
-  }
-
-  const normalMatch = text.match(/filename="?([^"]+)"?/i);
-  if (normalMatch?.[1]) {
-    return normalMatch[1].trim();
-  }
-
-  return "";
-}
-
-async function readStreamToText(stream) {
-  return await new Promise((resolve, reject) => {
-    let data = "";
-
-    stream.on("data", (chunk) => {
-      data += chunk.toString();
-    });
-
-    stream.on("end", () => resolve(data));
-    stream.on("error", reject);
-  });
-}
-
-async function apiGet(url, params, timeout = 35000) {
   const response = await axios.get(url, {
     timeout,
     params,
     validateStatus: () => true,
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+      Accept: "application/json,text/plain,*/*",
+    },
   });
 
   const data = response.data;
@@ -195,7 +163,7 @@ async function apiGet(url, params, timeout = 35000) {
 }
 
 async function resolveSearch(query) {
-  const data = await apiGet(API_SEARCH_URL, { q: query, limit: 1 }, 25000);
+  const data = await apiGetJson(API_SEARCH_URL, { q: query, limit: 1 }, 25000);
   const first = data?.results?.[0];
 
   if (!first?.url) {
@@ -203,62 +171,16 @@ async function resolveSearch(query) {
   }
 
   return {
-    videoUrl: first.url,
+    videoUrl: normalizeYouTubeUrl(first.url),
     title: safeFileName(first.title || "video"),
     thumbnail: first.thumbnail || null,
   };
 }
 
-async function requestVideoLink(videoUrl, endpointUrl, sourceLabel) {
-  const data = await apiGet(
-    endpointUrl,
-    {
-      mode: "link",
-      quality: VIDEO_QUALITY,
-      url: videoUrl,
-    },
-    45000
-  );
-
-  const downloadUrl = normalizeApiUrl(pickApiDownloadUrl(data));
-  if (!downloadUrl) {
-    throw new Error(`La ruta ${sourceLabel} no devolvió enlace de descarga.`);
-  }
-
-  return {
-    sourceLabel,
-    downloadUrl,
-    title: safeFileName(data?.title || data?.result?.title || "video"),
-    fileName: normalizeMp4Name(
-      data?.filename || data?.fileName || data?.result?.filename || "video.mp4"
-    ),
-  };
-}
-
-async function resolveFastestVideoLink(videoUrl) {
-  try {
-    return await Promise.any([
-      requestVideoLink(videoUrl, API_VIDEO_URL, "principal"),
-      requestVideoLink(videoUrl, API_VIDEO_LEGACY_URL, "legacy"),
-      requestVideoLink(videoUrl, API_VIDEO_ALT_URL, "alterna"),
-    ]);
-  } catch (error) {
-    const messages = Array.isArray(error?.errors)
-      ? error.errors
-          .map((item) => String(item?.message || item || "").trim())
-          .filter(Boolean)
-      : [];
-
-    throw new Error(
-      messages[0] ||
-        "No se pudo obtener un enlace de descarga desde las rutas internas."
-    );
-  }
-}
-
 async function resolveSearchCached(query) {
   const cacheKey = `ytsearch:${String(query || "").trim().toLowerCase()}`;
   const cached = getDownloadCache(cacheKey);
+
   if (cached?.videoUrl) return cached;
 
   return withInflightDedup(cacheKey, async () => {
@@ -268,371 +190,104 @@ async function resolveSearchCached(query) {
   });
 }
 
-async function resolveFastestVideoLinkCached(videoUrl) {
-  const cacheKey = `ytdlmp4:${String(videoUrl || "").trim()}`;
+async function requestDirectLink(videoUrl) {
+  const data = await apiGetJson(
+    API_VIDEO_URL,
+    {
+      mode: "link",
+      quality: VIDEO_QUALITY,
+      url: videoUrl,
+    },
+    45000
+  );
+
+  const directLink = normalizeApiUrl(pickApiDownloadUrl(data));
+  if (!directLink) {
+    throw new Error("La API no devolvió un enlace directo.");
+  }
+
+  return {
+    title: safeFileName(data?.title || "video"),
+    videoId: data?.video_id || "",
+    qualityRequested: data?.quality_requested || VIDEO_QUALITY,
+    quality: data?.quality || "SD",
+    duration: data?.duration || "Desconocida",
+    format: data?.format || "MP4",
+    fileName: data?.filename || "video.mp4",
+    directLink,
+    streamLink: normalizeApiUrl(data?.stream_url_full || data?.stream_url || ""),
+    expiresIn: Number(data?.expires_in_hint_seconds || 1200),
+    cached: Boolean(data?.cached),
+    source: data?.source || "dvyer",
+    creator: data?.creator || "dvyer",
+  };
+}
+
+async function resolveDirectLinkCached(videoUrl) {
+  const cacheKey = `ytfast:${String(videoUrl || "").trim()}`;
   const cached = getDownloadCache(cacheKey);
-  if (cached?.downloadUrl) return cached;
+
+  if (
+    cached?.directLink &&
+    cached?.expiresAt &&
+    cached.expiresAt > Date.now() + 60000
+  ) {
+    return cached;
+  }
 
   return withInflightDedup(cacheKey, async () => {
-    const result = await resolveFastestVideoLink(videoUrl);
-    setDownloadCache(cacheKey, result);
-    return result;
-  });
-}
+    const result = await requestDirectLink(videoUrl);
+    const expiresAt = Date.now() + Math.max(60000, result.expiresIn * 1000);
 
-async function downloadVideoFromInternalLink(
-  downloadUrl,
-  outputPath,
-  suggestedFileName = "video.mp4",
-  options = {}
-) {
-  const signal = options?.signal || null;
-  throwIfAborted(signal);
-
-  let response;
-  try {
-    response = await axios.get(downloadUrl, {
-      responseType: "stream",
-      timeout: REQUEST_TIMEOUT,
-      signal,
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
-        Accept: "*/*",
-        Referer: `${API_BASE}/`,
-      },
-      validateStatus: () => true,
-      maxRedirects: 5,
-    });
-  } catch (error) {
-    if (signal?.aborted) {
-      throw buildAbortError(signal);
-    }
-    throw error;
-  }
-
-  if (response.status >= 400) {
-    const errorText = await readStreamToText(response.data).catch(() => "");
-    let parsed = null;
-
-    try {
-      parsed = JSON.parse(errorText);
-    } catch {}
-
-    throw new Error(
-      extractApiError(
-        parsed || { message: errorText || "Error al descargar el video." },
-        response.status
-      )
-    );
-  }
-
-  const contentLength = Number(response.headers?.["content-length"] || 0);
-  if (contentLength && contentLength > MAX_VIDEO_BYTES) {
-    throw new Error("Video demasiado grande");
-  }
-
-  let downloaded = 0;
-
-  response.data.on("data", (chunk) => {
-    downloaded += chunk.length;
-    if (downloaded > MAX_VIDEO_BYTES) {
-      response.data.destroy(new Error("Video demasiado grande"));
-    }
-  });
-
-  const outputStream = fs.createWriteStream(outputPath);
-  const releaseAbort = bindAbort(signal, () => {
-    const abortError = buildAbortError(signal);
-    response.data?.destroy?.(abortError);
-    outputStream.destroy(abortError);
-    deleteFileSafe(outputPath);
-  });
-
-  try {
-    await pipeline(response.data, outputStream);
-  } catch (error) {
-    deleteFileSafe(outputPath);
-    if (signal?.aborted) {
-      throw buildAbortError(signal);
-    }
-    throw error;
-  } finally {
-    releaseAbort();
-  }
-
-  throwIfAborted(signal);
-
-  if (!fs.existsSync(outputPath)) {
-    throw new Error("No se pudo descargar el video.");
-  }
-
-  const size = fs.statSync(outputPath).size;
-
-  if (!size || size < 150000) {
-    throw new Error("Video inválido");
-  }
-
-  if (size > MAX_VIDEO_BYTES) {
-    throw new Error("Video demasiado grande");
-  }
-
-  const fromHeader = parseContentDispositionFileName(response.headers?.["content-disposition"]);
-
-  return {
-    path: outputPath,
-    size,
-    fileName: fromHeader || suggestedFileName || path.basename(outputPath),
-  };
-}
-
-async function downloadVideoFromApi(videoUrl, outputPath, options = {}) {
-  const signal = options?.signal || null;
-  throwIfAborted(signal);
-
-  let response;
-  try {
-    response = await axios.get(API_VIDEO_URL, {
-      responseType: "stream",
-      timeout: REQUEST_TIMEOUT,
-      signal,
-      params: {
-        mode: "file",
-        quality: VIDEO_QUALITY,
-        url: videoUrl,
-      },
-      validateStatus: () => true,
-    });
-  } catch (error) {
-    if (signal?.aborted) {
-      throw buildAbortError(signal);
-    }
-    throw error;
-  }
-
-  if (response.status >= 400) {
-    const errorText = await readStreamToText(response.data).catch(() => "");
-    let parsed = null;
-
-    try {
-      parsed = JSON.parse(errorText);
-    } catch {}
-
-    throw new Error(
-      extractApiError(
-        parsed || { message: errorText || "Error al descargar el video." },
-        response.status
-      )
-    );
-  }
-
-  const contentLength = Number(response.headers?.["content-length"] || 0);
-  if (contentLength && contentLength > MAX_VIDEO_BYTES) {
-    throw new Error("Video demasiado grande");
-  }
-
-  let downloaded = 0;
-
-  response.data.on("data", (chunk) => {
-    downloaded += chunk.length;
-    if (downloaded > MAX_VIDEO_BYTES) {
-      response.data.destroy(new Error("Video demasiado grande"));
-    }
-  });
-
-  const outputStream = fs.createWriteStream(outputPath);
-  const releaseAbort = bindAbort(signal, () => {
-    const abortError = buildAbortError(signal);
-    response.data?.destroy?.(abortError);
-    outputStream.destroy(abortError);
-    deleteFileSafe(outputPath);
-  });
-
-  try {
-    await pipeline(response.data, outputStream);
-  } catch (error) {
-    deleteFileSafe(outputPath);
-    if (signal?.aborted) {
-      throw buildAbortError(signal);
-    }
-    throw error;
-  } finally {
-    releaseAbort();
-  }
-
-  throwIfAborted(signal);
-
-  if (!fs.existsSync(outputPath)) {
-    throw new Error("No se pudo descargar el video.");
-  }
-
-  const size = fs.statSync(outputPath).size;
-
-  if (!size || size < 150000) {
-    throw new Error("Video invalido");
-  }
-
-  if (size > MAX_VIDEO_BYTES) {
-    throw new Error("Video demasiado grande");
-  }
-
-  const fromHeader = parseContentDispositionFileName(response.headers?.["content-disposition"]);
-
-  return {
-    path: outputPath,
-    size,
-    fileName: fromHeader || path.basename(outputPath),
-  };
-}
-
-async function normalizeVideoForWhatsApp(inputPath, outputPath, options = {}) {
-  const signal = options?.signal || null;
-  throwIfAborted(signal);
-
-  return await new Promise((resolve, reject) => {
-    const ffmpeg = spawn(
-      "ffmpeg",
-      [
-        "-y",
-        "-i",
-        inputPath,
-        "-c",
-        "copy",
-        "-movflags",
-        "+faststart",
-        "-loglevel",
-        "error",
-        outputPath,
-      ],
-      {
-        stdio: ["ignore", "ignore", "pipe"],
-      }
-    );
-
-    let settled = false;
-    const releaseAbort = bindAbort(signal, () => {
-      deleteFileSafe(outputPath);
-      try {
-        ffmpeg.kill("SIGKILL");
-      } catch {}
-    });
-
-    const finishReject = (error) => {
-      if (settled) return;
-      settled = true;
-      releaseAbort();
-      reject(signal?.aborted ? buildAbortError(signal) : error);
+    const finalResult = {
+      ...result,
+      expiresAt,
     };
 
-    const finishResolve = (value) => {
-      if (settled) return;
-      settled = true;
-      releaseAbort();
-      resolve(value);
-    };
-
-    ffmpeg.on("error", (error) => {
-      if (error?.code === "ENOENT") {
-        finishResolve(false);
-        return;
-      }
-      finishReject(error);
-    });
-
-    ffmpeg.on("close", (code) => {
-      if (signal?.aborted) {
-        finishReject(buildAbortError(signal));
-        return;
-      }
-
-      if (code === 0) {
-        finishResolve(true);
-        return;
-      }
-      finishResolve(false);
-    });
+    setDownloadCache(cacheKey, finalResult);
+    return finalResult;
   });
 }
 
-async function sendVideoOrDocument(sock, from, quoted, { filePath, fileName, title, size }) {
-  if (size > VIDEO_AS_DOCUMENT_THRESHOLD) {
-    await sock.sendMessage(
-      from,
-      {
-        document: { url: filePath },
-        mimetype: "video/mp4",
-        fileName,
-        caption: `api dvyer\n\n🎬 ${title}\n🎚️ ${VIDEO_QUALITY}\n📦 Enviado como documento`,
-        ...global.channelInfo,
-      },
-      quoted
-    );
-    return "document";
-  }
+function toUserErrorMessage(error) {
+  const msg = String(error?.message || "").toLowerCase();
 
-  try {
-    await sock.sendMessage(
-      from,
-      {
-        video: { url: filePath },
-        mimetype: "video/mp4",
-        fileName,
-        caption: `api dvyer\n\n🎬 ${title}\n🎚️ ${VIDEO_QUALITY}`,
-        ...global.channelInfo,
-      },
-      quoted
-    );
-    return "video";
-  } catch (e1) {
-    console.error("send local video failed:", e1?.message || e1);
-
-    await sock.sendMessage(
-      from,
-      {
-        document: { url: filePath },
-        mimetype: "video/mp4",
-        fileName,
-        caption: `api dvyer\n\n🎬 ${title}\n🎚️ ${VIDEO_QUALITY}\n📦 Enviado como documento`,
-        ...global.channelInfo,
-      },
-      quoted
-    );
-    return "document";
-  }
+  if (msg.includes("no se encontró")) return "❌ No encontré ese video.";
+  if (msg.includes("youtube")) return "❌ Envíame un enlace válido de YouTube.";
+  if (msg.includes("timeout")) return "❌ La API tardó demasiado en responder.";
+  if (msg.includes("http 429")) return "❌ La API está ocupada, intenta en unos segundos.";
+  if (msg.includes("http 403")) return "❌ La API rechazó la solicitud.";
+  if (msg.includes("http 404")) return "❌ No se encontró el recurso solicitado.";
+  if (msg.includes("enlace directo")) return "❌ No pude obtener el enlace directo.";
+  return "❌ No pude procesar el video en este momento.";
 }
 
 export default {
-  command: ["ytmp4", "ytdlmp4"],
+  command: ["ytfast", "ytrapido", "ytdirect"],
   category: "descarga",
 
   run: async (ctx) => {
     const { sock, from } = ctx;
     const msg = ctx.m || ctx.msg || null;
-    const abortSignal = ctx.abortSignal || null;
     const quoted = msg?.key ? { quoted: msg } : undefined;
-    const userId = `${from}:video`;
+    const userId = `${from}:ytfast`;
 
-    let rawVideoFile = null;
-    let finalVideoFile = null;
     let downloadCharge = null;
 
     const until = cooldowns.get(userId);
     if (until && until > Date.now()) {
       return sock.sendMessage(from, {
-        text: `⏳ Espera ${getCooldownRemaining(until)}s`,
+        text: `⏳ Espera ${getCooldownRemaining(until)}s antes de pedir otro enlace.`,
         ...global.channelInfo,
       });
     }
-
-    cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
 
     try {
       const rawInput = resolveUserInput(ctx);
 
       if (!rawInput) {
-        cooldowns.delete(userId);
         return sock.sendMessage(from, {
-          text: "❌ Uso: .ytmp4 <nombre o link> o responde a un mensaje con el link",
+          text: "❌ Uso: .ytfast <nombre o link de YouTube>",
           ...global.channelInfo,
         });
       }
@@ -641,9 +296,17 @@ export default {
       let title = "video";
       let thumbnail = null;
 
-      if (!videoUrl) {
+      if (videoUrl) {
+        videoUrl = normalizeYouTubeUrl(videoUrl);
+
+        if (!videoUrl) {
+          return sock.sendMessage(from, {
+            text: "❌ Envíame un enlace válido de YouTube.",
+            ...global.channelInfo,
+          });
+        }
+      } else {
         if (isHttpUrl(rawInput)) {
-          cooldowns.delete(userId);
           return sock.sendMessage(from, {
             text: "❌ Envíame un link válido de YouTube.",
             ...global.channelInfo,
@@ -656,107 +319,82 @@ export default {
         thumbnail = search.thumbnail;
       }
 
+      cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
+
       downloadCharge = await chargeDownloadRequest(ctx, {
-        feature: "ytmp4",
+        feature: "ytfast",
         title,
         videoUrl,
       });
-      if (!downloadCharge.ok) {
+
+      if (!downloadCharge?.ok) {
         cooldowns.delete(userId);
         return;
       }
 
+      const loadingMessage = thumbnail
+        ? {
+            image: { url: thumbnail },
+            caption:
+              `⚡ Obteniendo enlace directo...\n\n` +
+              `🎬 ${title}\n` +
+              `🎚️ Calidad: ${VIDEO_QUALITY}\n` +
+              `🌐 ${API_BASE}`,
+            ...global.channelInfo,
+          }
+        : {
+            text:
+              `⚡ Obteniendo enlace directo...\n\n` +
+              `🎬 ${title}\n` +
+              `🎚️ Calidad: ${VIDEO_QUALITY}\n` +
+              `🌐 ${API_BASE}`,
+            ...global.channelInfo,
+          };
+
+      await sock.sendMessage(from, loadingMessage, quoted);
+
+      const result = await resolveDirectLinkCached(videoUrl);
+      const finalTitle = safeFileName(result.title || title || "video");
+
+      const text =
+        `⚡ *Descarga rápida lista*\n\n` +
+        `🎬 *${finalTitle}*\n` +
+        `🎚️ Calidad: ${result.qualityRequested}\n` +
+        `📦 Formato: ${result.format}\n` +
+        `⏱️ Duración: ${result.duration}\n` +
+        `🔗 Expira aprox en: ${Math.ceil(result.expiresIn / 60)} min\n\n` +
+        `📥 *Descarga directa:*\n${result.directLink}` +
+        (result.streamLink ? `\n\n▶️ *Stream:*\n${result.streamLink}` : "");
+
       await sock.sendMessage(
         from,
-        thumbnail
-          ? {
-              image: { url: thumbnail },
-              caption: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}\n🌐 ${API_BASE}`,
-              ...global.channelInfo,
-            }
-          : {
-              text: `⬇️ Preparando video...\n\n🎬 ${title}\n🎚️ Calidad: ${VIDEO_QUALITY}\n🌐 ${API_BASE}`,
-              ...global.channelInfo,
-            },
+        {
+          text,
+          ...global.channelInfo,
+        },
         quoted
       );
-
-      const stamp = Date.now();
-      rawVideoFile = path.join(TMP_DIR, `${stamp}-raw.mp4`);
-      finalVideoFile = path.join(TMP_DIR, `${stamp}-final.mp4`);
-
-      let downloaded = null;
-      throwIfAborted(abortSignal);
-
-      try {
-        const fastestLink = await resolveFastestVideoLinkCached(videoUrl);
-        title = safeFileName(fastestLink.title || title || "video");
-
-        console.log(
-          `YTMP4 link ganador: ${fastestLink.sourceLabel} -> ${fastestLink.downloadUrl}`
-        );
-
-        downloaded = await downloadVideoFromInternalLink(
-          fastestLink.downloadUrl,
-          rawVideoFile,
-          fastestLink.fileName || `${title}.mp4`,
-          { signal: abortSignal }
-        );
-      } catch (linkError) {
-        console.log(
-          `YTMP4 link fallback: ${linkError?.message || linkError}`
-        );
-        downloaded = await downloadVideoFromApi(videoUrl, rawVideoFile, {
-          signal: abortSignal,
-        });
-      }
-
-      const normalized = await normalizeVideoForWhatsApp(
-        downloaded.path,
-        finalVideoFile,
-        { signal: abortSignal }
-      );
-
-      const sendPath =
-        normalized && fs.existsSync(finalVideoFile)
-          ? finalVideoFile
-          : rawVideoFile;
-
-      const sendSize = fs.existsSync(sendPath)
-        ? fs.statSync(sendPath).size
-        : downloaded.size;
-
-      const finalTitle = safeFileName(
-        stripExtension(downloaded.fileName || `${title}.mp4`) || title
-      );
-
-      throwIfAborted(abortSignal);
-      await sendVideoOrDocument(sock, from, quoted, {
-        filePath: sendPath,
-        fileName: normalizeMp4Name(downloaded.fileName || `${finalTitle}.mp4`),
-        title: finalTitle,
-        size: sendSize,
-      });
     } catch (err) {
-      const aborted = abortSignal?.aborted === true;
-      console.error("YTMP4 ERROR:", err?.message || err);
+      console.error("YTFAST ERROR:", err?.message || err);
+
       refundDownloadCharge(ctx, downloadCharge, {
-        feature: "ytmp4",
+        feature: "ytfast",
         error: String(err?.message || err || "unknown_error"),
       });
-      cooldowns.delete(userId);
 
-      if (aborted) {
-        return;
-      }
-
-      await sock.sendMessage(from, {
-        text: `❌ ${String(err?.message || "Error al procesar el video.")}`,
-        ...global.channelInfo,
-      });
+      await sock.sendMessage(
+        from,
+        {
+          text: toUserErrorMessage(err),
+          ...global.channelInfo,
+        },
+        quoted
+      );
     } finally {
-      deleteFileSafe(rawVideoFile);
-      deleteFileSafe(finalVideoFile);
+      const until = cooldowns.get(userId);
+      if (until && until <= Date.now()) {
+        cooldowns.delete(userId);
+      }
     }
   },
 };
