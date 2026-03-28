@@ -7,7 +7,7 @@ export default {
   category: 'tools',
 
   async run(ctx) {
-    const { sock: conn, m, from, args } = ctx
+    const { sock: conn, m, from, args, isGroup } = ctx
 
     try {
       const query = Array.isArray(args) ? args.join(' ').trim() : ''
@@ -37,52 +37,41 @@ export default {
         rowId: `.play ${v.url}`
       }))
 
-      const sections = [
-        {
-          title: 'Resultados encontrados',
-          rows
-        }
-      ]
-
-      let imageBuffer = null
-
-      try {
-        if (videos[0]?.thumbnail) {
-          const response = await fetch(videos[0].thumbnail)
-          const arrayBuffer = await response.arrayBuffer()
-          imageBuffer = Buffer.from(arrayBuffer)
-        }
-      } catch (imgErr) {
-        console.error('No pude descargar la miniatura:', imgErr)
-      }
-
-      const messageContent = {
-        caption: `Resultados: ${query}\n\nSelecciona una opción`,
-        footer: 'ミ★ Enigma-Bot ★彡',
-        title: 'YouTube Search',
-        buttonText: 'Seleccionar',
-        sections
-      }
-
-      if (imageBuffer) {
+      // En privado: lista seleccionable
+      if (!isGroup) {
         return await conn.sendMessage(
           from,
           {
-            image: imageBuffer,
-            ...messageContent
+            text: `🎵 Resultados: ${query}\n\nSelecciona una opción`,
+            footer: 'ミ★ Enigma-Bot ★彡',
+            title: 'YouTube Search',
+            buttonText: 'Seleccionar',
+            sections: [
+              {
+                title: 'Resultados encontrados',
+                rows
+              }
+            ]
           },
           { quoted: m }
         )
       }
 
+      // En grupo: botones simples + texto
+      const top = videos.slice(0, 3)
+
       return await conn.sendMessage(
         from,
         {
-          text: `Resultados: ${query}\n\nSelecciona una opción`,
-          footer: 'ミ★ Enigma-Bot ★彡',
-          title: 'YouTube Search',
-          buttonText: 'Seleccionar',
-          sections
+          text:
+            `🎵 *Resultados:* ${query}\n\n` +
+            top.map((v, i) => `*${i + 1}.* ${v.title}\n${v.url}`).join('\n\n'),
+          footer: 'En grupos uso botones simples porque la lista no abre bien aquí.',
+          buttons: top.map((v, i) => ({
+            buttonId: `.play ${v.url}`,
+            buttonText: { displayText: `Opción ${i + 1}` },
+            type: 1
+          }))
         },
         { quoted: m }
       )
