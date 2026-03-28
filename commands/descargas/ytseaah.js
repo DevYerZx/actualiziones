@@ -1,68 +1,58 @@
-
 import yts from 'yt-search'
 
 export default {
   name: 'ysearch',
-  command: ['ytsearch', 'yts'],
+  command: ['yts', 'ytsearch'],
   category: 'tools',
 
   async run(ctx) {
     const { sock: conn, m, from, args } = ctx
 
     try {
-      const query = Array.isArray(args) ? args.join(' ').trim() : ''
-
+      const query = args.join(' ')
       if (!query) {
-        return await conn.sendMessage(
-          from,
-          { text: 'Ejemplo:\n.ysearch bad bunny' },
-          { quoted: m }
-        )
+        return m.reply('Ejemplo:\n.yts ozuna odisea')
       }
 
-      const search = await yts(query)
-      const videos = Array.isArray(search?.videos) ? search.videos.slice(0, 10) : []
+      const res = await yts(query)
+      const videos = res.videos.slice(0, 10)
 
-      if (!videos.length) {
-        return await conn.sendMessage(
-          from,
-          { text: 'No encontré resultados en YouTube.' },
-          { quoted: m }
-        )
-      }
+      if (!videos.length) return m.reply('No encontré resultados')
 
-      const rows = videos.map((video, index) => ({
-        title: `${index + 1}. ${video.title}`.slice(0, 72),
-        description: `👤 ${video.author?.name || 'Desconocido'} | ⏱️ ${video.timestamp || '??:??'}`.slice(0, 72),
-        rowId: `.play ${video.url}`
+      // 👉 filas
+      const rows = videos.map((v, i) => ({
+        title: `${i + 1}. ${v.title}`,
+        description: `⏱ ${v.timestamp} | 👤 ${v.author.name}`,
+        rowId: `.play ${v.url}`
       }))
 
-      return await conn.sendMessage(
+      // 👉 secciones
+      const sections = [
+        {
+          title: "Resultados encontrados",
+          rows
+        }
+      ]
+
+      // 👉 imagen (opcional, puedes cambiarla)
+      const thumb = await (await fetch(videos[0].thumbnail)).buffer()
+
+      await conn.sendMessage(
         from,
         {
-          text: '🎵 Resultados de búsqueda\nSelecciona una opción',
-          footer: 'ミ★ 𝘌𝘯𝘪𝘨𝘮𝘢-𝘉𝘰𝘵 ★彡',
-          title: 'Resultados de YouTube',
-          sections: [
-            {
-              title: 'Opciones disponibles',
-              rows
-            }
-          ],
-          buttonText: 'Ver opciones'
+          image: thumb,
+          caption: `Resultados: ${query}\n\nSelecciona una opción`,
+          footer: "ミ★ Enigma-Bot ★彡",
+          title: "YouTube Search",
+          buttonText: "Seleccionar",
+          sections
         },
         { quoted: m }
       )
-    } catch (err) {
-      console.error('Error en ysearch:', err)
 
-      try {
-        return await conn.sendMessage(
-          from,
-          { text: `Error en ysearch:\n${err?.message || err}` },
-          { quoted: m }
-        )
-      } catch {}
+    } catch (e) {
+      console.error(e)
+      m.reply('Error en ysearch')
     }
   }
 }
