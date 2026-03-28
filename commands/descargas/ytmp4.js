@@ -1,30 +1,48 @@
+import axios from "axios";
 import { buildDvyerUrl, getDvyerBaseUrl } from "../../lib/api-manager.js";
-import { getDownloadCache, setDownloadCache, withInflightDedup } from "../../lib/download-cache.js";
-import { chargeDownloadRequest, refundDownloadCharge } from "../economia/download-access.js";
 
-const API_VIDEO_PATH = "/ytdlmp4";
-const API_SEARCH_PATH = "/ytsearch";
 const API_BASE = getDvyerBaseUrl();
-const API_VIDEO_URL = buildDvyerUrl(API_VIDEO_PATH);
-const API_SEARCH_URL = buildDvyerUrl(API_SEARCH_PATH);
-
+const API_VIDEO_URL = buildDvyerUrl("/ytdlmp4");
+const API_SEARCH_URL = buildDvyerUrl("/ytsearch");
 const VIDEO_QUALITY = "360p";
-const COOLDOWN_TIME = 8 * 1000;
+const COOLDOWN_MS = 8000;
 
 const cooldowns = new Map();
 
-function safeFileName(name) {
+function extractTextFromMessage(message) {
   return (
-    String(name || "video")
-      .replace(/[\\/:*?"<>|]/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 80) || "video"
+    message?.text ||
+    message?.caption ||
+    message?.body ||
+    message?.message?.conversation ||
+    message?.message?.extendedTextMessage?.text ||
+    message?.message?.imageMessage?.caption ||
+    message?.message?.videoMessage?.caption ||
+    message?.message?.documentMessage?.caption ||
+    message?.conversation ||
+    message?.extendedTextMessage?.text ||
+    message?.imageMessage?.caption ||
+    message?.videoMessage?.caption ||
+    message?.documentMessage?.caption ||
+    ""
   );
 }
 
-function isHttpUrl(value) {
-  return /^https?:\/\//i.test(String(value || ""));
+function getQuotedMessage(ctx, msg) {
+  return (
+    ctx?.quoted ||
+    msg?.quoted ||
+    msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage ||
+    null
+  );
+}
+
+function resolveUserInput(ctx) {
+  const msg = ctx.m || ctx.msg || null;
+  const argsText = Array.isArray(ctx.args) ? ctx.args.join(" ").trim() : "";
+  const quotedMessage = getQuotedMessage(ctx, msg);
+  const quotedText = extractTextFromMessage(quotedMessage);
+  return argsText || quotedText || "";
 }
 
 function extractYouTubeUrl(text) {
@@ -36,10 +54,7 @@ function extractYouTubeUrl(text) {
 
 function normalizeYouTubeUrl(input) {
   try {
-    const raw = String(input || "").trim();
-    if (!raw) return "";
-
-    const url = new URL(raw);
+    const url = new URL(String(input || "").trim());
     const host = url.hostname.toLowerCase();
 
     if (host === "youtu.be") {
@@ -86,84 +101,52 @@ function pickApiDownloadUrl(data) {
   );
 }
 
-function extractTextFromMessage(message) {
-  return (
-    message?.text ||
-    message?.caption ||
-    message?.body ||
-    message?.message?.conversation ||
-    message?.message?.extendedTextMessage?.text ||
-    message?.message?.imageMessage?.caption ||
-    message?.message?.videoMessage?.caption ||
-    message?.message?.documentMessage?.caption ||
-    message?.conversation ||
-    message?.extendedTextMessage?.text ||
-    message?.imageMessage?.caption ||
-    message?.videoMessage?.caption ||
-    message?.documentMessage?.caption ||
-    ""
-  );
+function safeText(text, max = 120) {
+  return String(text || "video").replace(/\s+/g, " ").trim().slice(0, max);
 }
 
-function getQuotedMessage(ctx, msg) {
-  return (
-    ctx?.quoted ||
-    msg?.quoted ||
-    msg?.message?.extendedTextMessage?.contextInfo?.quotedMessage ||
-    null
-  );
-}
-
-function resolveUserInput(ctx) {
-  const msg = ctx.m || ctx.msg || null;
-  const argsText = Array.isArray(ctx.args) ? ctx.args.join(" ").trim() : "";
-  const quotedMessage = getQuotedMessage(ctx, msg);
-  const quotedText = extractTextFromMessage(quotedMessage);
-  return argsText || quotedText || "";
+function normalizeMp4Name(name) {
+  const clean = safeText(String(name || "video").replace(/\.mp4$/i, ""), 80)
+    .replace(/[\\/:*?"<>|]/g, "");
+  return `${clean || "video"}.mp4`;
 }
 
 function getCooldownRemaining(untilMs) {
   return Math.max(0, Math.ceil((untilMs - Date.now()) / 1000));
 }
 
-function extractApiError(data, status) {
-  return (
-    data?.detail ||
-    data?.error?.message ||
-    data?.message ||
-    (status ? `HTTP ${status}` : "Error de API")
-  );
-}
-
-async function apiGetJson(url, params, timeout = 45000) {
-  const axios = (await import("axios")).default;
-
+async function apiGet(url, params, timeout = 45000) {
   const response = await axios.get(url, {
     timeout,
     params,
     validateStatus: () => true,
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122 Safari/537.36",
+      "User-Agent": "Mozilla/5.0",
       Accept: "application/json,text/plain,*/*",
     },
   });
 
-  const data = response.data;
-
   if (response.status >= 400) {
-    throw new Error(extractApiError(data, response.status));
+    throw new Error(
+      response?.data?.detail ||
+        response?.data?.message ||
+        `HTTP ${response.status}`
+    );
   }
 
-  if (data?.ok === false || data?.status === false) {
-    throw new Error(extractApiError(data, response.status));
+  if (response.data?.ok === false || response.data?.status === false) {
+    throw new Error(
+      response?.data?.detail ||
+        response?.data?.message ||
+        "La API devolvió error."
+    );
   }
 
-  return data;
+  return response.data;
 }
 
 async function resolveSearch(query) {
-  const data = await apiGetJson(API_SEARCH_URL, { q: query, limit: 1 }, 25000);
+  const data = await apiGet(API_SEARCH_URL, { q: query, limit: 1 }, 25000);
   const first = data?.results?.[0];
 
   if (!first?.url) {
@@ -171,126 +154,98 @@ async function resolveSearch(query) {
   }
 
   return {
-    videoUrl: normalizeYouTubeUrl(first.url),
-    title: safeFileName(first.title || "video"),
+    url: normalizeYouTubeUrl(first.url),
+    title: safeText(first.title || "video"),
     thumbnail: first.thumbnail || null,
   };
 }
 
-async function resolveSearchCached(query) {
-  const cacheKey = `ytsearch:${String(query || "").trim().toLowerCase()}`;
-  const cached = getDownloadCache(cacheKey);
-
-  if (cached?.videoUrl) return cached;
-
-  return withInflightDedup(cacheKey, async () => {
-    const result = await resolveSearch(query);
-    setDownloadCache(cacheKey, result);
-    return result;
+async function getDirectVideo(videoUrl) {
+  const data = await apiGet(API_VIDEO_URL, {
+    mode: "link",
+    url: videoUrl,
+    quality: VIDEO_QUALITY,
   });
-}
 
-async function requestDirectLink(videoUrl) {
-  const data = await apiGetJson(
-    API_VIDEO_URL,
-    {
-      mode: "link",
-      quality: VIDEO_QUALITY,
-      url: videoUrl,
-    },
-    45000
-  );
-
-  const directLink = normalizeApiUrl(pickApiDownloadUrl(data));
-  if (!directLink) {
-    throw new Error("La API no devolvió un enlace directo.");
+  const mediaUrl = normalizeApiUrl(pickApiDownloadUrl(data));
+  if (!mediaUrl) {
+    throw new Error("La API no devolvió enlace de descarga.");
   }
 
   return {
-    title: safeFileName(data?.title || "video"),
-    videoId: data?.video_id || "",
-    qualityRequested: data?.quality_requested || VIDEO_QUALITY,
-    quality: data?.quality || "SD",
-    duration: data?.duration || "Desconocida",
-    format: data?.format || "MP4",
-    fileName: data?.filename || "video.mp4",
-    directLink,
-    streamLink: normalizeApiUrl(data?.stream_url_full || data?.stream_url || ""),
-    expiresIn: Number(data?.expires_in_hint_seconds || 1200),
-    cached: Boolean(data?.cached),
-    source: data?.source || "dvyer",
-    creator: data?.creator || "dvyer",
+    title: safeText(data?.title || "video"),
+    fileName: normalizeMp4Name(data?.filename || data?.title || "video"),
+    mediaUrl,
+    streamUrl: normalizeApiUrl(data?.stream_url_full || data?.stream_url || ""),
+    quality: data?.quality_requested || VIDEO_QUALITY,
+    duration: data?.duration || "",
   };
 }
 
-async function resolveDirectLinkCached(videoUrl) {
-  const cacheKey = `ytfast:${String(videoUrl || "").trim()}`;
-  const cached = getDownloadCache(cacheKey);
-
-  if (
-    cached?.directLink &&
-    cached?.expiresAt &&
-    cached.expiresAt > Date.now() + 60000
-  ) {
-    return cached;
-  }
-
-  return withInflightDedup(cacheKey, async () => {
-    const result = await requestDirectLink(videoUrl);
-    const expiresAt = Date.now() + Math.max(60000, result.expiresIn * 1000);
-
-    const finalResult = {
-      ...result,
-      expiresAt,
-    };
-
-    setDownloadCache(cacheKey, finalResult);
-    return finalResult;
-  });
+async function sendRemoteVideo(sock, from, quoted, info) {
+  return await sock.sendMessage(
+    from,
+    {
+      video: { url: info.mediaUrl },
+      mimetype: "video/mp4",
+      fileName: info.fileName,
+      caption:
+        `api dvyer\n\n` +
+        `🎬 ${info.title}\n` +
+        `🎚️ ${info.quality}` +
+        (info.duration ? `\n⏱️ ${info.duration}` : ""),
+      ...global.channelInfo,
+    },
+    quoted
+  );
 }
 
-function toUserErrorMessage(error) {
-  const msg = String(error?.message || "").toLowerCase();
-
-  if (msg.includes("no se encontró")) return "❌ No encontré ese video.";
-  if (msg.includes("youtube")) return "❌ Envíame un enlace válido de YouTube.";
-  if (msg.includes("timeout")) return "❌ La API tardó demasiado en responder.";
-  if (msg.includes("http 429")) return "❌ La API está ocupada, intenta en unos segundos.";
-  if (msg.includes("http 403")) return "❌ La API rechazó la solicitud.";
-  if (msg.includes("http 404")) return "❌ No se encontró el recurso solicitado.";
-  if (msg.includes("enlace directo")) return "❌ No pude obtener el enlace directo.";
-  return "❌ No pude procesar el video en este momento.";
+async function sendRemoteDocument(sock, from, quoted, info) {
+  return await sock.sendMessage(
+    from,
+    {
+      document: { url: info.mediaUrl },
+      mimetype: "video/mp4",
+      fileName: info.fileName,
+      caption:
+        `api dvyer\n\n` +
+        `🎬 ${info.title}\n` +
+        `🎚️ ${info.quality}\n` +
+        `📦 Enviado como documento`,
+      ...global.channelInfo,
+    },
+    quoted
+  );
 }
 
 export default {
-  command: ["ytfast", "ytrapido", "ytdirect"],
+  command: ["ytmp4"],
   category: "descarga",
 
   run: async (ctx) => {
     const { sock, from } = ctx;
     const msg = ctx.m || ctx.msg || null;
     const quoted = msg?.key ? { quoted: msg } : undefined;
-    const userId = `${from}:ytfast`;
-
-    let downloadCharge = null;
+    const userId = `${from}:ytmp4fast`;
 
     const until = cooldowns.get(userId);
     if (until && until > Date.now()) {
       return sock.sendMessage(from, {
-        text: `⏳ Espera ${getCooldownRemaining(until)}s antes de pedir otro enlace.`,
+        text: `⏳ Espera ${getCooldownRemaining(until)}s`,
         ...global.channelInfo,
       });
     }
 
     try {
       const rawInput = resolveUserInput(ctx);
-
       if (!rawInput) {
         return sock.sendMessage(from, {
-          text: "❌ Uso: .ytfast <nombre o link de YouTube>",
+          text: "❌ Uso: .ytmp4 <link o nombre>",
           ...global.channelInfo,
         });
       }
+
+      cooldowns.set(userId, Date.now() + COOLDOWN_MS);
 
       let videoUrl = extractYouTubeUrl(rawInput);
       let title = "video";
@@ -298,103 +253,76 @@ export default {
 
       if (videoUrl) {
         videoUrl = normalizeYouTubeUrl(videoUrl);
-
         if (!videoUrl) {
-          return sock.sendMessage(from, {
-            text: "❌ Envíame un enlace válido de YouTube.",
-            ...global.channelInfo,
-          });
-        }
-      } else {
-        if (isHttpUrl(rawInput)) {
+          cooldowns.delete(userId);
           return sock.sendMessage(from, {
             text: "❌ Envíame un link válido de YouTube.",
             ...global.channelInfo,
           });
         }
-
-        const search = await resolveSearchCached(rawInput);
-        videoUrl = search.videoUrl;
-        title = search.title;
-        thumbnail = search.thumbnail;
+      } else {
+        const found = await resolveSearch(rawInput);
+        videoUrl = found.url;
+        title = found.title;
+        thumbnail = found.thumbnail;
       }
 
-      cooldowns.set(userId, Date.now() + COOLDOWN_TIME);
+      await sock.sendMessage(
+        from,
+        thumbnail
+          ? {
+              image: { url: thumbnail },
+              caption: `⚡ Procesando...\n\n🎬 ${title}\n🎚️ ${VIDEO_QUALITY}`,
+              ...global.channelInfo,
+            }
+          : {
+              text: `⚡ Procesando...\n\n🎬 ${title}\n🎚️ ${VIDEO_QUALITY}`,
+              ...global.channelInfo,
+            },
+        quoted
+      );
 
-      downloadCharge = await chargeDownloadRequest(ctx, {
-        feature: "ytfast",
-        title,
-        videoUrl,
-      });
+      const info = await getDirectVideo(videoUrl);
 
-      if (!downloadCharge?.ok) {
-        cooldowns.delete(userId);
+      try {
+        await sendRemoteVideo(sock, from, quoted, info);
         return;
+      } catch (e1) {
+        console.log("ytmp4 remote video fail:", e1?.message || e1);
       }
 
-      const loadingMessage = thumbnail
-        ? {
-            image: { url: thumbnail },
-            caption:
-              `⚡ Obteniendo enlace directo...\n\n` +
-              `🎬 ${title}\n` +
-              `🎚️ Calidad: ${VIDEO_QUALITY}\n` +
-              `🌐 ${API_BASE}`,
-            ...global.channelInfo,
-          }
-        : {
-            text:
-              `⚡ Obteniendo enlace directo...\n\n` +
-              `🎬 ${title}\n` +
-              `🎚️ Calidad: ${VIDEO_QUALITY}\n` +
-              `🌐 ${API_BASE}`,
-            ...global.channelInfo,
-          };
-
-      await sock.sendMessage(from, loadingMessage, quoted);
-
-      const result = await resolveDirectLinkCached(videoUrl);
-      const finalTitle = safeFileName(result.title || title || "video");
-
-      const text =
-        `⚡ *Descarga rápida lista*\n\n` +
-        `🎬 *${finalTitle}*\n` +
-        `🎚️ Calidad: ${result.qualityRequested}\n` +
-        `📦 Formato: ${result.format}\n` +
-        `⏱️ Duración: ${result.duration}\n` +
-        `🔗 Expira aprox en: ${Math.ceil(result.expiresIn / 60)} min\n\n` +
-        `📥 *Descarga directa:*\n${result.directLink}` +
-        (result.streamLink ? `\n\n▶️ *Stream:*\n${result.streamLink}` : "");
+      try {
+        await sendRemoteDocument(sock, from, quoted, info);
+        return;
+      } catch (e2) {
+        console.log("ytmp4 remote document fail:", e2?.message || e2);
+      }
 
       await sock.sendMessage(
         from,
         {
-          text,
+          text:
+            `⚠️ No pude adjuntar el archivo directo.\n\n` +
+            `🎬 ${info.title}\n` +
+            `📥 ${info.mediaUrl}` +
+            (info.streamUrl ? `\n▶️ ${info.streamUrl}` : ""),
           ...global.channelInfo,
         },
         quoted
       );
     } catch (err) {
-      console.error("YTFAST ERROR:", err?.message || err);
-
-      refundDownloadCharge(ctx, downloadCharge, {
-        feature: "ytfast",
-        error: String(err?.message || err || "unknown_error"),
-      });
+      console.error("YTMP4 ERROR:", err?.message || err);
 
       await sock.sendMessage(
         from,
         {
-          text: toUserErrorMessage(err),
+          text: `❌ ${String(err?.message || "Error al procesar el video.")}`,
           ...global.channelInfo,
         },
         quoted
       );
     } finally {
-      const until = cooldowns.get(userId);
-      if (until && until <= Date.now()) {
-        cooldowns.delete(userId);
-      }
+      setTimeout(() => cooldowns.delete(userId), COOLDOWN_MS);
     }
   },
 };
