@@ -1,3 +1,4 @@
+
 import yts from 'yt-search'
 
 export default {
@@ -9,50 +10,90 @@ export default {
     const { sock: conn, m, from, args } = ctx
 
     try {
-      const query = args.join(' ')
+      const query = Array.isArray(args) ? args.join(' ').trim() : ''
+
       if (!query) {
-        return m.reply('Ejemplo:\n.yts ozuna odisea')
+        return await conn.sendMessage(
+          from,
+          { text: 'Ejemplo:\n.yts ozuna odisea' },
+          { quoted: m }
+        )
       }
 
       const res = await yts(query)
-      const videos = res.videos.slice(0, 10)
+      const videos = Array.isArray(res?.videos) ? res.videos.slice(0, 10) : []
 
-      if (!videos.length) return m.reply('No encontré resultados')
+      if (!videos.length) {
+        return await conn.sendMessage(
+          from,
+          { text: 'No encontré resultados.' },
+          { quoted: m }
+        )
+      }
 
-      // 👉 filas
       const rows = videos.map((v, i) => ({
-        title: `${i + 1}. ${v.title}`,
-        description: `⏱ ${v.timestamp} | 👤 ${v.author.name}`,
+        title: `${i + 1}. ${v.title}`.slice(0, 72),
+        description: `⏱ ${v.timestamp || '??:??'} | 👤 ${v.author?.name || 'Desconocido'}`.slice(0, 72),
         rowId: `.play ${v.url}`
       }))
 
-      // 👉 secciones
       const sections = [
         {
-          title: "Resultados encontrados",
+          title: 'Resultados encontrados',
           rows
         }
       ]
 
-      // 👉 imagen (opcional, puedes cambiarla)
-      const thumb = await (await fetch(videos[0].thumbnail)).buffer()
+      let imageBuffer = null
 
-      await conn.sendMessage(
+      try {
+        if (videos[0]?.thumbnail) {
+          const response = await fetch(videos[0].thumbnail)
+          const arrayBuffer = await response.arrayBuffer()
+          imageBuffer = Buffer.from(arrayBuffer)
+        }
+      } catch (imgErr) {
+        console.error('No pude descargar la miniatura:', imgErr)
+      }
+
+      const messageContent = {
+        caption: `Resultados: ${query}\n\nSelecciona una opción`,
+        footer: 'ミ★ Enigma-Bot ★彡',
+        title: 'YouTube Search',
+        buttonText: 'Seleccionar',
+        sections
+      }
+
+      if (imageBuffer) {
+        return await conn.sendMessage(
+          from,
+          {
+            image: imageBuffer,
+            ...messageContent
+          },
+          { quoted: m }
+        )
+      }
+
+      return await conn.sendMessage(
         from,
         {
-          image: thumb,
-          caption: `Resultados: ${query}\n\nSelecciona una opción`,
-          footer: "ミ★ Enigma-Bot ★彡",
-          title: "YouTube Search",
-          buttonText: "Seleccionar",
+          text: `Resultados: ${query}\n\nSelecciona una opción`,
+          footer: 'ミ★ Enigma-Bot ★彡',
+          title: 'YouTube Search',
+          buttonText: 'Seleccionar',
           sections
         },
         { quoted: m }
       )
-
     } catch (e) {
-      console.error(e)
-      m.reply('Error en ysearch')
+      console.error('Error en ysearch:', e)
+
+      return await conn.sendMessage(
+        from,
+        { text: `Error en ysearch:\n${e?.message || e}` },
+        { quoted: m }
+      )
     }
   }
 }
