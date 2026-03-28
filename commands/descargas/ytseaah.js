@@ -7,7 +7,7 @@ export default {
   category: 'tools',
 
   async run(ctx) {
-    const { sock: conn, m, from, args, isGroup } = ctx
+    const { sock: conn, m, from, sender, args, isGroup } = ctx
 
     try {
       const query = Array.isArray(args) ? args.join(' ').trim() : ''
@@ -37,43 +37,43 @@ export default {
         rowId: `.play ${v.url}`
       }))
 
-      // En privado: lista seleccionable
+      const privateJid = String(sender || '').includes('@')
+        ? sender
+        : `${String(sender || '').replace(/[^0-9]/g, '')}@s.whatsapp.net`
+
+      const listPayload = {
+        text: `🎵 Resultados: ${query}\n\nSelecciona una opción`,
+        footer: 'ミ★ Enigma-Bot ★彡',
+        title: 'YouTube Search',
+        buttonText: 'Seleccionar',
+        sections: [
+          {
+            title: 'Resultados encontrados',
+            rows
+          }
+        ]
+      }
+
       if (!isGroup) {
         return await conn.sendMessage(
           from,
-          {
-            text: `🎵 Resultados: ${query}\n\nSelecciona una opción`,
-            footer: 'ミ★ Enigma-Bot ★彡',
-            title: 'YouTube Search',
-            buttonText: 'Seleccionar',
-            sections: [
-              {
-                title: 'Resultados encontrados',
-                rows
-              }
-            ]
-          },
+          listPayload,
           { quoted: m }
         )
       }
 
-      // En grupo: botones simples + texto
-      const top = videos.slice(0, 3)
-
-      return await conn.sendMessage(
+      await conn.sendMessage(
         from,
         {
-          text:
-            `🎵 *Resultados:* ${query}\n\n` +
-            top.map((v, i) => `*${i + 1}.* ${v.title}\n${v.url}`).join('\n\n'),
-          footer: 'En grupos uso botones simples porque la lista no abre bien aquí.',
-          buttons: top.map((v, i) => ({
-            buttonId: `.play ${v.url}`,
-            buttonText: { displayText: `Opción ${i + 1}` },
-            type: 1
-          }))
+          text: '📩 Te envié la lista al privado para que puedas seleccionar una opción.'
         },
         { quoted: m }
+      )
+
+      return await conn.sendMessage(
+        privateJid,
+        listPayload,
+        {}
       )
     } catch (e) {
       console.error('Error en ysearch:', e)
