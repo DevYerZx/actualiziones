@@ -1,61 +1,80 @@
 import yts from 'yt-search'
 
-case 'ysearch':
-case 'ytsearch': {
-  if (!text) {
-    return m.reply('Ejemplo:\n.ysearch ozuna')
-  }
+export default {
+  name: 'ysearch',
+  aliases: ['ytsearch', 'yts'],
+  category: 'descargas',
+  description: 'Busca videos en YouTube',
+  async execute(conn, m, args) {
+    try {
+      const text = args.join(' ').trim()
 
-  try {
-    let search = await yts(text)
-    let videos = search.videos.slice(0, 10)
-
-    if (!videos || !videos.length) {
-      return m.reply('No encontré resultados.')
-    }
-
-    let listSections = [
-      {
-        title: 'Resultados encontrados',
-        rows: videos.map((v, i) => ({
-          title: `${i + 1}. ${v.title}`.slice(0, 72),
-          description: `${v.timestamp} | ${v.author?.name || 'Desconocido'}`.slice(0, 72),
-          rowId: `.play ${v.url}`
-        }))
+      if (!text) {
+        return await conn.sendMessage(
+          m.chat,
+          { text: 'Ejemplo:\n.ysearch bad bunny' },
+          { quoted: m }
+        )
       }
-    ]
 
-    if (typeof conn.sendList === 'function') {
-      await conn.sendList(
-        m.chat,
-        `🎵 Resultados para: ${text}\nSelecciona una opción`,
-        'ミ★ 𝘌𝘯𝘪𝘨𝘮𝘢-𝘉𝘰𝘵 ★彡',
-        'YouTube Search',
-        'Ver resultados',
-        listSections,
-        m
-      )
-    } else {
-      let caption = `🎵 *RESULTADOS PARA:* ${text}\n\n`
+      const search = await yts(text)
+      const videos = search.videos.slice(0, 10)
+
+      if (!videos.length) {
+        return await conn.sendMessage(
+          m.chat,
+          { text: 'No encontré resultados en YouTube.' },
+          { quoted: m }
+        )
+      }
+
+      const listSections = [
+        {
+          title: 'Resultados encontrados',
+          rows: videos.map((v, i) => ({
+            title: `${i + 1}. ${v.title}`.slice(0, 72),
+            description: `${v.timestamp} | ${v.author?.name || 'Desconocido'}`.slice(0, 72),
+            rowId: `.play ${v.url}`
+          }))
+        }
+      ]
+
+      if (typeof conn.sendList === 'function') {
+        return await conn.sendList(
+          m.chat,
+          `🎵 Resultados para: ${text}\nSelecciona una opción`,
+          'ミ★ 𝘌𝘯𝘪𝘨𝘮𝘢-𝘉𝘰𝘵 ★彡',
+          'Resultados de YouTube',
+          'Ver opciones',
+          listSections,
+          m
+        )
+      }
+
+      let txt = `🎵 *RESULTADOS DE BÚSQUEDA*\n\n`
+      txt += `🔎 *Texto:* ${text}\n\n`
 
       for (let i = 0; i < videos.length; i++) {
-        let v = videos[i]
-        caption += `*${i + 1}.* ${v.title}\n`
-        caption += `⏱️ ${v.timestamp}\n`
-        caption += `👤 ${v.author?.name || 'Desconocido'}\n`
-        caption += `🔗 ${v.url}\n`
-        caption += `📥 .play ${v.url}\n\n`
+        const v = videos[i]
+        txt += `*${i + 1}.* ${v.title}\n`
+        txt += `⏱️ ${v.timestamp}\n`
+        txt += `👤 ${v.author?.name || 'Desconocido'}\n`
+        txt += `🔗 ${v.url}\n`
+        txt += `📥 Usa: .play ${v.url}\n\n`
       }
 
-      await conn.sendMessage(
+      return await conn.sendMessage(
         m.chat,
-        { text: caption },
+        { text: txt },
+        { quoted: m }
+      )
+    } catch (err) {
+      console.error('Error en ysearch:', err)
+      return await conn.sendMessage(
+        m.chat,
+        { text: 'Ocurrió un error al buscar en YouTube.' },
         { quoted: m }
       )
     }
-  } catch (e) {
-    console.error(e)
-    m.reply('Error al hacer la búsqueda en YouTube.')
   }
 }
-break
