@@ -7,7 +7,7 @@ export default {
   category: 'tools',
 
   async run(ctx) {
-    const { sock: conn, m, from, sender, args, isGroup } = ctx
+    const { sock: conn, m, from, args } = ctx
 
     try {
       const query = Array.isArray(args) ? args.join(' ').trim() : ''
@@ -15,7 +15,7 @@ export default {
       if (!query) {
         return await conn.sendMessage(
           from,
-          { text: 'Ejemplo:\n.yts ozuna odisea' },
+          { text: 'Ejemplo:\n.yts bad bunny' },
           { quoted: m }
         )
       }
@@ -32,48 +32,35 @@ export default {
       }
 
       const rows = videos.map((v, i) => ({
-        title: `${i + 1}. ${v.title}`.slice(0, 72),
+        header: `${i + 1}`,
+        title: String(v.title || 'Sin título').slice(0, 72),
         description: `⏱ ${v.timestamp || '??:??'} | 👤 ${v.author?.name || 'Desconocido'}`.slice(0, 72),
-        rowId: `.play ${v.url}`
+        id: `.play ${v.url}`
       }))
 
-      const privateJid = String(sender || '').includes('@')
-        ? sender
-        : `${String(sender || '').replace(/[^0-9]/g, '')}@s.whatsapp.net`
-
-      const listPayload = {
-        text: `🎵 Resultados: ${query}\n\nSelecciona una opción`,
-        footer: 'ミ★ Enigma-Bot ★彡',
-        title: 'YouTube Search',
-        buttonText: 'Seleccionar',
-        sections: [
-          {
-            title: 'Resultados encontrados',
-            rows
-          }
-        ]
-      }
-
-      if (!isGroup) {
-        return await conn.sendMessage(
-          from,
-          listPayload,
-          { quoted: m }
-        )
-      }
-
-      await conn.sendMessage(
+      return await conn.sendMessage(
         from,
         {
-          text: '📩 Te envié la lista al privado para que puedas seleccionar una opción.'
+          text: `🎵 Resultados para: ${query}`,
+          title: 'YouTube Search',
+          subtitle: 'Selecciona una canción',
+          footer: 'ミ★ Enigma-Bot ★彡',
+          interactiveButtons: [
+            {
+              name: 'single_select',
+              buttonParamsJson: JSON.stringify({
+                title: 'Seleccionar',
+                sections: [
+                  {
+                    title: 'Resultados encontrados',
+                    rows
+                  }
+                ]
+              })
+            }
+          ]
         },
         { quoted: m }
-      )
-
-      return await conn.sendMessage(
-        privateJid,
-        listPayload,
-        {}
       )
     } catch (e) {
       console.error('Error en ysearch:', e)
